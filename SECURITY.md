@@ -22,3 +22,12 @@ Do not commit found private keys, wallet material, API tokens, or worker
 credentials. If a real puzzle key is found, stop workers and handle it outside
 this repository using an independently reviewed operational-security plan.
 
+## Distributed deployment
+
+- Pass the coordinator token through `PUZZLEFORGE_API_TOKEN`, never a command
+  argument or repository file.
+- Use HTTPS for remote workers. Plain HTTP is accepted automatically only for
+  loopback addresses and requires an explicit override elsewhere.
+- Treat the SQLite database as sensitive operational state and back it up.
+- Do not expose the coordinator directly to the public internet without a
+  maintained TLS reverse proxy, access controls, and request monitoring.

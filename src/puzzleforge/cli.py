@@ -3,7 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
+import socket
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -165,12 +168,141 @@ def command_verify(args: argparse.Namespace) -> int:
     return 0 if matches else 1
 
 
+def _engine_from_args(args: argparse.Namespace):
+    from .engine import BitCrackEngine, EngineTuning
+
+    return BitCrackEngine(
+        binary=args.binary,
+        tuning=EngineTuning(
+            device=args.device,
+            blocks=args.blocks,
+            threads=args.threads,
+            points=args.points,
+        ),
+        timeout_seconds=args.engine_timeout,
+    )
+
+
+def command_token(_: argparse.Namespace) -> int:
+    print(secrets.token_urlsafe(32))
+    return 0
+
+
+def command_gpu_probe(args: argparse.Namespace) -> int:
+    print(_engine_from_args(args).probe())
+    return 0
+
+
+def command_gpu_test(args: argparse.Namespace) -> int:
+    from .partition import KeyChunk
+
+    puzzle = get_puzzle(8)
+    chunk = KeyChunk(
+        ordinal=0,
+        chunk_id=0,
+        start=puzzle.start,
+        end=puzzle.end,
+    )
+    outcome = _engine_from_args(args).scan(puzzle, chunk)
+    if outcome.status != "found" or outcome.found_key != 0xE0:
+        print(f"FAIL: {outcome.message}", file=sys.stderr)
+        return 1
+    print("PASS: GPU engine solved puzzle #8 and PuzzleForge verified the result.")
+    print(f"Rate: {outcome.rate_keys_per_second:,.0f} keys/s")
+    return 0
+
+
+def command_coordinator_init(args: argparse.Namespace) -> int:
+    from .coordinator import Coordinator
+
+    coordinator = Coordinator.initialize(
+        args.database,
+        puzzle_number=args.puzzle,
+        chunk_size=args.chunk_size,
+        seed=args.seed,
+    )
+    print(json.dumps(coordinator.status(), indent=2, sort_keys=True))
+    return 0
+
+
+def command_coordinator_status(args: argparse.Namespace) -> int:
+    from .coordinator import Coordinator
+
+    print(json.dumps(Coordinator(args.database).status(), indent=2, sort_keys=True))
+    return 0
+
+
+def _token_from_environment(name: str) -> str:
+    token = os.environ.get(name)
+    if not token:
+        raise ValueError(f"environment variable {name} is not set")
+    return token
+
+
+def command_coordinator_serve(args: argparse.Namespace) -> int:
+    from .coordinator import Coordinator
+    from .coordinator_http import serve
+
+    serve(
+        Coordinator(args.database),
+        api_token=_token_from_environment(args.token_env),
+        host=args.host,
+        port=args.port,
+    )
+    return 0
+
+
+def command_gpu_worker(args: argparse.Namespace) -> int:
+    from .remote import CoordinatorClient, GPUWorker
+
+    client = CoordinatorClient(
+        args.coordinator,
+        _token_from_environment(args.token_env),
+        allow_insecure_http=args.allow_insecure_http,
+    )
+    worker = GPUWorker(
+        client,
+        _engine_from_args(args),
+        worker=args.worker,
+        lease_seconds=args.lease_seconds,
+    )
+    completed = 0
+    try:
+        while args.max_chunks is None or completed < args.max_chunks:
+            result = worker.run_once()
+            print(result.message, flush=True)
+            if result.found:
+                return 0
+            if result.outcome == "complete":
+                completed += 1
+            if result.outcome == "idle":
+                state = client.status().get("state")
+                if state in {"found", "exhausted"} or args.once:
+                    return 0
+                time.sleep(args.idle_seconds)
+            elif args.once:
+                return 0 if result.outcome == "complete" else 1
+    except KeyboardInterrupt:
+        print("Worker stopped.", file=sys.stderr)
+        return 130
+    return 0
+
+
 def add_plan_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("puzzle", type=int, choices=[p.number for p in puzzles()])
     parser.add_argument("--chunk-size", type=positive_integer, default=100_000)
     parser.add_argument("--seed", default="puzzleforge-default")
     parser.add_argument("--shards", type=positive_integer, default=1)
     parser.add_argument("--shard-index", type=nonnegative_integer, default=0)
+
+
+def add_engine_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--binary", type=Path, required=True)
+    parser.add_argument("--device", type=nonnegative_integer)
+    parser.add_argument("--blocks", type=positive_integer)
+    parser.add_argument("--threads", type=positive_integer)
+    parser.add_argument("--points", type=positive_integer)
+    parser.add_argument("--engine-timeout", type=float)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -214,6 +346,67 @@ def build_parser() -> argparse.ArgumentParser:
     verify_parser.add_argument("puzzle", type=int, choices=[p.number for p in puzzles()])
     verify_parser.add_argument("private_key", type=parse_integer)
     verify_parser.set_defaults(handler=command_verify)
+
+    token_parser = subparsers.add_parser("token", help="generate a coordinator API token")
+    token_parser.set_defaults(handler=command_token)
+
+    gpu_probe_parser = subparsers.add_parser(
+        "gpu-probe", help="list devices visible to BitCrack"
+    )
+    add_engine_arguments(gpu_probe_parser)
+    gpu_probe_parser.set_defaults(handler=command_gpu_probe)
+
+    gpu_test_parser = subparsers.add_parser(
+        "gpu-test", help="run the solved puzzle #8 end-to-end test"
+    )
+    add_engine_arguments(gpu_test_parser)
+    gpu_test_parser.set_defaults(handler=command_gpu_test)
+
+    coordinator_init_parser = subparsers.add_parser(
+        "coordinator-init", help="create a distributed campaign database"
+    )
+    coordinator_init_parser.add_argument("database", type=Path)
+    coordinator_init_parser.add_argument(
+        "puzzle", type=int, choices=[p.number for p in puzzles()]
+    )
+    coordinator_init_parser.add_argument(
+        "--chunk-size", type=positive_integer, default=1 << 32
+    )
+    coordinator_init_parser.add_argument("--seed", default="puzzleforge-distributed")
+    coordinator_init_parser.set_defaults(handler=command_coordinator_init)
+
+    coordinator_status_parser = subparsers.add_parser(
+        "coordinator-status", help="show exact distributed campaign coverage"
+    )
+    coordinator_status_parser.add_argument("database", type=Path)
+    coordinator_status_parser.set_defaults(handler=command_coordinator_status)
+
+    coordinator_serve_parser = subparsers.add_parser(
+        "coordinator-serve", help="serve the distributed worker API"
+    )
+    coordinator_serve_parser.add_argument("database", type=Path)
+    coordinator_serve_parser.add_argument("--host", default="127.0.0.1")
+    coordinator_serve_parser.add_argument("--port", type=positive_integer, default=8787)
+    coordinator_serve_parser.add_argument(
+        "--token-env", default="PUZZLEFORGE_API_TOKEN"
+    )
+    coordinator_serve_parser.set_defaults(handler=command_coordinator_serve)
+
+    gpu_worker_parser = subparsers.add_parser(
+        "gpu-worker", help="run a BitCrack worker against a coordinator"
+    )
+    gpu_worker_parser.add_argument("--coordinator", required=True)
+    gpu_worker_parser.add_argument("--worker", default=socket.gethostname())
+    gpu_worker_parser.add_argument(
+        "--token-env", default="PUZZLEFORGE_API_TOKEN"
+    )
+    gpu_worker_parser.add_argument("--lease-seconds", type=positive_integer, default=900)
+    gpu_worker_parser.add_argument("--idle-seconds", type=positive_integer, default=15)
+    gpu_worker_parser.add_argument("--max-chunks", type=positive_integer)
+    gpu_worker_parser.add_argument("--once", action="store_true")
+    gpu_worker_parser.add_argument("--allow-insecure-http", action="store_true")
+    add_engine_arguments(gpu_worker_parser)
+    gpu_worker_parser.set_defaults(handler=command_gpu_worker)
     return parser
 
 
@@ -222,7 +415,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     try:
         raise SystemExit(args.handler(args))
-    except (ValueError, OSError, json.JSONDecodeError) as exc:
+    except (ValueError, OSError, RuntimeError, json.JSONDecodeError) as exc:
         parser.error(str(exc))
 
 

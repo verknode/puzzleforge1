@@ -14,12 +14,13 @@
 - [ ] C++20 reference backend using libsecp256k1
 - [ ] Batched point generation (one scalar multiplication per batch)
 - [ ] SIMD SHA-256 and RIPEMD-160 pipeline
-- [ ] Stable machine-readable worker protocol
+- [x] Stable machine-readable worker protocol
 - [ ] Cross-backend golden-vector tests
 
 ## M2 — GPU
 
-- [ ] CUDA capability detection and benchmark harness
+- [x] cuBitCrack/clBitCrack capability probe and strict execution adapter
+- [ ] Reproducible GPU benchmark and auto-tuning harness
 - [ ] CUDA secp256k1 point-walk kernel
 - [ ] Batched HASH160 target comparison on device
 - [ ] Multi-GPU scheduling and thermal/power telemetry
@@ -27,9 +28,10 @@
 
 ## M3 — distributed search
 
-- [ ] SQLite/PostgreSQL lease coordinator
-- [ ] Expiring leases and automatic range recovery
-- [ ] Signed worker identity and duplicate-result rejection
+- [x] SQLite transactional lease coordinator
+- [x] Expiring leases and automatic range recovery
+- [x] Bearer-authenticated workers and duplicate-result rejection
+- [x] Exact unique-coverage vs random-with-replacement metrics
 - [ ] Live throughput, coverage, ETA, and failure dashboard
 - [ ] Export/import of independently audited coverage maps
 
@@ -40,4 +42,3 @@
 3. Report measured hardware, settings, key rate, and power draw.
 4. Keep checkpoints forward-compatible and atomic.
 5. Prefer exact coverage accounting over speculative key-selection patterns.
-

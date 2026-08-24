@@ -1,8 +1,8 @@
 # PuzzleForge
 
-PuzzleForge is a challenge-scoped research toolkit for the public Bitcoin
-Puzzle Transaction. The first milestone targets the still-open address-only
-puzzles #71 through #74.
+PuzzleForge is a challenge-scoped compute and coordination toolkit for the
+public Bitcoin Puzzle Transaction. It targets the still-open address-only
+puzzles #71 through #74 and includes solved puzzle #8 as an end-to-end test.
 
 The project deliberately accepts only puzzles in its reviewed registry. It is
 not a general wallet scanner, seed finder, recovery service, or transaction
@@ -11,16 +11,20 @@ broadcaster.
 ## What works today
 
 - dependency-free secp256k1 and compressed P2PKH reference implementation;
-- verified registry entries for puzzles #71–#74;
+- reviewed registry entries for puzzles #8 and #71–#74;
 - deterministic, non-overlapping, pseudo-random chunk allocation;
 - parallel CPU reference scanner with resumable atomic checkpoints;
+- strict cuBitCrack/clBitCrack adapter with independent result verification;
+- SQLite coordinator with transactional leases and automatic expired-work recovery;
+- authenticated HTTP worker protocol for many remote GPU machines;
+- exact coverage accounting and a random-with-replacement comparison;
 - private-key verification against an official puzzle address;
 - probability and runtime estimates with no fake "AI pattern" claims;
 - unit tests and GitHub Actions CI.
 
-The Python scanner is a correctness oracle and orchestration foundation, not a
-competitive GPU engine. Puzzle #71 alone contains `2^70` candidates. A serious
-attempt needs a native GPU backend and many coordinated devices.
+The Python scanner is a correctness oracle, not the fast path. GPU work is sent
+to a locally installed BitCrack binary. PuzzleForge owns target selection,
+range allocation, lease recovery, accounting, and result verification.
 
 ## Quick start
 
@@ -33,6 +37,14 @@ puzzleforge list
 puzzleforge inspect 71
 puzzleforge plan 71 --chunk-size 0x100000 --seed furnes
 puzzleforge estimate 71 --rate 1500000000
+```
+
+Validate an installed GPU engine against solved puzzle #8. A correct run finds
+the known `0xe0` test value and independently derives the registered address:
+
+```bash
+puzzleforge gpu-probe --binary ./cuBitCrack
+puzzleforge gpu-test --binary ./cuBitCrack --device 0
 ```
 
 Run one small reference chunk and save progress:
@@ -57,10 +69,56 @@ puzzleforge scan 71 --shards 4 --shard-index 0 --seed team-a
 puzzleforge scan 71 --shards 4 --shard-index 1 --seed team-a
 ```
 
+## Distributed GPU campaign
+
+Create a database and start the coordinator on the control machine:
+
+```bash
+export PUZZLEFORGE_API_TOKEN="$(puzzleforge token)"
+puzzleforge coordinator-init campaign.sqlite3 71 \
+  --chunk-size 0x100000000 \
+  --seed furnes-gpu-v1
+puzzleforge coordinator-serve campaign.sqlite3 --host 127.0.0.1 --port 8787
+```
+
+Run a worker on the same machine:
+
+```bash
+export PUZZLEFORGE_API_TOKEN="the-same-secret-token"
+puzzleforge gpu-worker \
+  --coordinator http://127.0.0.1:8787 \
+  --binary ./cuBitCrack \
+  --worker rtx4090-a \
+  --device 0 --blocks 32 --threads 256 --points 1024
+```
+
+Remote workers require HTTPS by default. A trusted encrypted tunnel can use
+`--allow-insecure-http`. Never put the API token in a command argument or
+commit it. See [docs/DISTRIBUTED.md](docs/DISTRIBUTED.md).
+
+Inspect exact progress at any time:
+
+```bash
+puzzleforge coordinator-status campaign.sqlite3
+```
+
+## What is actually different
+
+PuzzleForge does not claim a new cryptographic shortcut. Existing tools already
+provide fast elliptic-curve kernels. Its useful distinction is the audited
+campaign layer around those kernels: a bijective work order, no duplicate live
+leases, automatic recovery, strict full-range acknowledgements, independently
+verified matches, and exact durable coverage.
+
+For the same number of attempts, unique sampling is strictly better than random
+sampling with replacement because repeated candidates add no coverage. The
+advantage starts tiny and grows with campaign size; higher measured throughput
+remains the dominant practical improvement.
+
 ## Honest scale
 
-For an address-only puzzle, testing a fraction `f` of the range gives exactly
-`f` probability of finding the key, assuming the unknown key is uniformly
+For an address-only puzzle, testing a unique fraction `f` of the range gives
+exactly `f` probability of success, assuming the unknown value is uniformly
 distributed. There is no known shortcut for #71–#74. PuzzleForge therefore
 prioritizes fast kernels, zero duplicated work, verifiable checkpoints, and
 measured throughput.
@@ -76,4 +134,3 @@ features. See [SECURITY.md](SECURITY.md).
 See [ROADMAP.md](ROADMAP.md). Every performance claim must be backed by a
 reproducible benchmark and every optimization must match the Python reference
 vectors before it is merged.
-

@@ -3,9 +3,17 @@ from __future__ import annotations
 from .model import Puzzle
 
 
-# Address/status snapshot reviewed on 2026-08-24. A future status refresh must
-# verify the on-chain target before changing this registry.
+# Address/status snapshot reviewed on 2026-08-24. Puzzle #8 is a solved,
+# deliberately tiny end-to-end test vector. A future status refresh must verify
+# the on-chain target before changing this registry.
 _PUZZLES = {
+    8: Puzzle(
+        number=8,
+        start=1 << 7,
+        end=(1 << 8) - 1,
+        address="1M92tSqNmQLYw33fuBvjmeadirh1ysMBxK",
+        status="solved-test-vector",
+    ),
     71: Puzzle(
         number=71,
         start=1 << 70,
@@ -45,4 +53,3 @@ def get_puzzle(number: int) -> Puzzle:
         raise ValueError(
             f"puzzle #{number} is not in the reviewed registry (allowed: {allowed})"
         ) from exc
-
