@@ -132,6 +132,21 @@ sampling with replacement because repeated candidates add no coverage. The
 advantage starts tiny and grows with campaign size; higher measured throughput
 remains the dominant practical improvement.
 
+## Experimental MOSAIC scheduler
+
+`mosaic-preview` interleaves uniform, bit-spread, edge-in, and center-out orders
+behind one global duplicate filter:
+
+```bash
+puzzleforge mosaic-preview 71 --chunk-size 0x100000000 --preview 32
+puzzleforge coordinator-init campaign.sqlite3 71 \
+  --mode mosaic --chunk-size 0x100000000
+```
+
+This is research infrastructure, not a claimed shortcut. A different ordering
+can help only if a tested non-uniform prior exists. See
+[docs/MOSAIC.md](docs/MOSAIC.md).
+
 ## Honest scale
 
 For an address-only puzzle, testing a unique fraction `f` of the range gives

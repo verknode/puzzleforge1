@@ -57,6 +57,10 @@ PuzzleForge invokes the engine without a shell and supplies the target and
 exact range itself. A worker cannot request an arbitrary target through the
 protocol.
 
+To use the experimental multi-order planner, add `--mode mosaic` when creating
+the database. Planner state and accepted work are updated atomically. Existing
+schema-v1 databases automatically migrate to `affine` mode when opened.
+
 ## HTTP API
 
 All `/v1/*` routes require `Authorization: Bearer ...`. `/health` is public.

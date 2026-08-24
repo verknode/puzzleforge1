@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 import unittest
 from decimal import Decimal
@@ -8,13 +9,19 @@ from puzzleforge.coordinator import Coordinator, LeaseRejected
 
 class CoordinatorTests(unittest.TestCase):
     def make_coordinator(
-        self, directory: str, *, puzzle: int = 71, chunk_size: int = 256
+        self,
+        directory: str,
+        *,
+        puzzle: int = 71,
+        chunk_size: int = 256,
+        planner_mode: str = "affine",
     ) -> Coordinator:
         return Coordinator.initialize(
             Path(directory) / "campaign.sqlite3",
             puzzle_number=puzzle,
             chunk_size=chunk_size,
             seed="coordinator-tests",
+            planner_mode=planner_mode,
         )
 
     def test_consecutive_leases_never_overlap(self) -> None:
@@ -25,7 +32,10 @@ class CoordinatorTests(unittest.TestCase):
             self.assertIsNotNone(first)
             self.assertIsNotNone(second)
             self.assertNotEqual(first.chunk_id, second.chunk_id)
-            self.assertTrue(first.chunk.end < second.chunk.start or second.chunk.end < first.chunk.start)
+            self.assertTrue(
+                first.chunk.end < second.chunk.start
+                or second.chunk.end < first.chunk.start
+            )
 
     def test_expired_lease_is_reissued_with_new_token(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -94,6 +104,105 @@ class CoordinatorTests(unittest.TestCase):
             self.assertEqual(first.sequence, second.sequence)
             status = coordinator.status(now_epoch=1002)
             self.assertEqual(status["worker_failures"], 1)
+
+    def test_mosaic_campaign_persists_unique_multi_lane_allocation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "campaign.sqlite3"
+            coordinator = Coordinator.initialize(
+                path,
+                puzzle_number=71,
+                chunk_size=256,
+                seed="mosaic-coordinator-test",
+                planner_mode="mosaic",
+            )
+            leases = [
+                coordinator.lease(
+                    f"gpu-{index}", lease_seconds=60, now_epoch=1000
+                )
+                for index in range(24)
+            ]
+            reopened = Coordinator(path)
+            leases.append(
+                reopened.lease("gpu-reopened", lease_seconds=60, now_epoch=1001)
+            )
+            chunk_ids = [lease.chunk_id for lease in leases]
+            self.assertEqual(len(chunk_ids), len(set(chunk_ids)))
+            self.assertGreater(len({lease.strategy_lane for lease in leases}), 1)
+            status = reopened.status(now_epoch=1002)
+            self.assertEqual(status["planner_mode"], "mosaic")
+            self.assertEqual(status["allocated_chunks"], 25)
+            self.assertGreater(len(status["strategy_lanes"]), 1)
+
+    def test_v1_database_is_migrated_without_losing_campaign(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "campaign.sqlite3"
+            connection = sqlite3.connect(path)
+            connection.executescript(
+                """
+                CREATE TABLE campaign (
+                    id INTEGER PRIMARY KEY,
+                    schema_version INTEGER NOT NULL,
+                    puzzle INTEGER NOT NULL,
+                    address TEXT NOT NULL,
+                    start_hex TEXT NOT NULL,
+                    end_hex TEXT NOT NULL,
+                    seed TEXT NOT NULL,
+                    chunk_size INTEGER NOT NULL,
+                    total_chunks INTEGER NOT NULL,
+                    next_sequence INTEGER NOT NULL,
+                    completed_chunks INTEGER NOT NULL,
+                    checked_keys TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    found_key_hex TEXT,
+                    reclaimed_leases INTEGER NOT NULL,
+                    total_failures INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE work (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sequence INTEGER NOT NULL UNIQUE,
+                    ordinal INTEGER NOT NULL,
+                    chunk_id INTEGER NOT NULL UNIQUE,
+                    start_hex TEXT NOT NULL,
+                    end_hex TEXT NOT NULL,
+                    size INTEGER NOT NULL,
+                    state TEXT NOT NULL,
+                    worker TEXT,
+                    lease_token TEXT UNIQUE,
+                    lease_expires_at REAL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    result_checked INTEGER,
+                    result_kind TEXT,
+                    found_key_hex TEXT,
+                    elapsed_seconds REAL,
+                    rate_keys_per_second REAL,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                PRAGMA user_version = 1;
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO campaign VALUES (
+                    1, 1, 71, '1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU',
+                    '400000000000000000', '7fffffffffffffffff', 'legacy',
+                    256, 4611686018427387904, 0, 0, '0', 'running', NULL,
+                    0, 0, 'created', 'updated'
+                )
+                """
+            )
+            connection.commit()
+            connection.close()
+
+            coordinator = Coordinator(path)
+            status = coordinator.status(now_epoch=1000)
+            lease = coordinator.lease("gpu-migrated", lease_seconds=60, now_epoch=1000)
+            self.assertEqual(status["schema_version"], 2)
+            self.assertEqual(status["planner_mode"], "affine")
+            self.assertEqual(lease.strategy_lane, "affine")
 
 
 if __name__ == "__main__":

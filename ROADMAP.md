@@ -37,7 +37,8 @@
 
 ## M4 — experimental scheduling and elastic capacity
 
-- [ ] MOSAIC strategy lanes with one global de-duplication map
+- [x] MOSAIC deterministic strategy lanes and global de-duplication planner
+- [x] Persist MOSAIC lane cursors in the lease coordinator
 - [ ] Holdout backtests on solved challenge vectors and uniform controls
 - [ ] Automatic rejection of strategies without measurable lift
 - [ ] Vast.ai and RunPod provider adapters

@@ -168,6 +168,45 @@ def command_verify(args: argparse.Namespace) -> int:
     return 0 if matches else 1
 
 
+def command_mosaic_preview(args: argparse.Namespace) -> int:
+    from .mosaic import MosaicPlanner
+
+    puzzle = get_puzzle(args.puzzle)
+    total_chunks = (puzzle.size + args.chunk_size - 1) // args.chunk_size
+    planner = MosaicPlanner(total_chunks, seed=args.seed)
+    candidates = []
+    checked_keys = 0
+    for candidate in planner.preview(args.preview):
+        start = puzzle.start + candidate.chunk_id * args.chunk_size
+        end = min(start + args.chunk_size - 1, puzzle.end)
+        checked_keys += end - start + 1
+        candidates.append(
+            {
+                **candidate.to_dict(),
+                "start": f"{start:x}",
+                "end": f"{end:x}",
+                "keys": end - start + 1,
+            }
+        )
+    print(
+        json.dumps(
+            {
+                "experimental": True,
+                "uniform_target_advantage_claimed": False,
+                "puzzle": puzzle.number,
+                "seed": args.seed,
+                "chunk_size": args.chunk_size,
+                "total_chunks": total_chunks,
+                "preview_unique_keys": checked_keys,
+                "planner_state": planner.state(),
+                "preview": candidates,
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
 def _engine_from_args(args: argparse.Namespace):
     from .engine import BitCrackEngine, EngineTuning
 
@@ -232,6 +271,7 @@ def command_gpu_benchmark(args: argparse.Namespace) -> int:
         puzzle_number=args.puzzle,
         chunk_size=args.chunk_size,
         seed=args.seed,
+        planner_mode=args.mode,
         sequence=args.sequence,
         repeats=args.repeats,
         profiles=tuning_profiles(args.profile, args.device),
@@ -391,6 +431,19 @@ def build_parser() -> argparse.ArgumentParser:
     verify_parser.add_argument("private_key", type=parse_integer)
     verify_parser.set_defaults(handler=command_verify)
 
+    mosaic_parser = subparsers.add_parser(
+        "mosaic-preview", help="preview the experimental multi-order scheduler"
+    )
+    mosaic_parser.add_argument(
+        "puzzle", type=int, choices=[p.number for p in puzzles()]
+    )
+    mosaic_parser.add_argument(
+        "--chunk-size", type=positive_integer, default=1 << 32
+    )
+    mosaic_parser.add_argument("--seed", default="puzzleforge-mosaic-v1")
+    mosaic_parser.add_argument("--preview", type=positive_integer, default=16)
+    mosaic_parser.set_defaults(handler=command_mosaic_preview)
+
     token_parser = subparsers.add_parser("token", help="generate a coordinator API token")
     token_parser.set_defaults(handler=command_token)
 
@@ -443,6 +496,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--chunk-size", type=positive_integer, default=1 << 32
     )
     coordinator_init_parser.add_argument("--seed", default="puzzleforge-distributed")
+    coordinator_init_parser.add_argument(
+        "--mode", choices=("affine", "mosaic"), default="affine"
+    )
     coordinator_init_parser.set_defaults(handler=command_coordinator_init)
 
     coordinator_status_parser = subparsers.add_parser(

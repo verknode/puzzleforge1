@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import re
 import secrets
@@ -13,11 +14,12 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .crypto import p2pkh_address_from_private_key
+from .mosaic import MosaicPlanner
 from .partition import ChunkPlan, KeyChunk
 from .registry import get_puzzle
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SQLITE_MAX_INTEGER = (1 << 63) - 1
 _WORKER_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}\Z")
 
@@ -28,6 +30,24 @@ class CoordinatorError(RuntimeError):
 
 class LeaseRejected(CoordinatorError):
     pass
+
+
+class _SQLiteSeen:
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self.connection = connection
+
+    def __len__(self) -> int:
+        return self.connection.execute("SELECT COUNT(*) FROM work").fetchone()[0]
+
+    def __contains__(self, chunk_id: object) -> bool:
+        if isinstance(chunk_id, bool) or not isinstance(chunk_id, int):
+            return False
+        return (
+            self.connection.execute(
+                "SELECT 1 FROM work WHERE chunk_id = ? LIMIT 1", (chunk_id,)
+            ).fetchone()
+            is not None
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +62,8 @@ class Lease:
     start_hex: str
     end_hex: str
     keys: int
+    strategy_lane: str
+    strategy_rank: int
     expires_at: float
 
     def to_dict(self) -> dict[str, Any]:
@@ -115,7 +137,7 @@ class Coordinator:
         if not self.path.is_file():
             raise FileNotFoundError(f"coordinator database not found: {self.path}")
         with self._connect() as connection:
-            self._assert_schema(connection)
+            self._prepare_schema(connection)
             self._load_campaign(connection)
 
     @classmethod
@@ -126,6 +148,7 @@ class Coordinator:
         puzzle_number: int,
         chunk_size: int,
         seed: str,
+        planner_mode: str = "affine",
     ) -> "Coordinator":
         if path.exists():
             raise FileExistsError(f"refusing to overwrite coordinator database: {path}")
@@ -133,6 +156,8 @@ class Coordinator:
             raise ValueError("chunk_size must fit a positive SQLite integer")
         if not seed or len(seed.encode("utf-8")) > 512:
             raise ValueError("seed must contain 1-512 UTF-8 bytes")
+        if planner_mode not in {"affine", "mosaic"}:
+            raise ValueError("planner_mode must be affine or mosaic")
 
         puzzle = get_puzzle(puzzle_number)
         plan = ChunkPlan(puzzle=puzzle, chunk_size=chunk_size, seed=seed)
@@ -141,6 +166,15 @@ class Coordinator:
             raise ValueError(
                 f"chunk_size is too small for SQLite; use at least {minimum} keys"
             )
+        planner_state = (
+            json.dumps(
+                MosaicPlanner(plan.total_chunks, seed=seed).state(),
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            if planner_mode == "mosaic"
+            else None
+        )
 
         path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(path, timeout=30, isolation_level=None)
@@ -166,6 +200,8 @@ class Coordinator:
                     found_key_hex TEXT,
                     reclaimed_leases INTEGER NOT NULL,
                     total_failures INTEGER NOT NULL,
+                    planner_mode TEXT NOT NULL CHECK (planner_mode IN ('affine', 'mosaic')),
+                    planner_state TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -190,6 +226,8 @@ class Coordinator:
                     found_key_hex TEXT,
                     elapsed_seconds REAL,
                     rate_keys_per_second REAL,
+                    strategy_lane TEXT NOT NULL,
+                    strategy_rank INTEGER NOT NULL,
                     last_error TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -206,8 +244,12 @@ class Coordinator:
                     id, schema_version, puzzle, address, start_hex, end_hex,
                     seed, chunk_size, total_chunks, next_sequence,
                     completed_chunks, checked_keys, state, found_key_hex,
-                    reclaimed_leases, total_failures, created_at, updated_at
-                ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, '0', 'running', NULL, 0, 0, ?, ?)
+                    reclaimed_leases, total_failures, planner_mode,
+                    planner_state, created_at, updated_at
+                ) VALUES (
+                    1, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, '0', 'running', NULL,
+                    0, 0, ?, ?, ?, ?
+                )
                 """,
                 (
                     SCHEMA_VERSION,
@@ -218,6 +260,8 @@ class Coordinator:
                     seed,
                     chunk_size,
                     plan.total_chunks,
+                    planner_mode,
+                    planner_state,
                     now,
                     now,
                 ),
@@ -247,8 +291,39 @@ class Coordinator:
             connection.close()
 
     @staticmethod
-    def _assert_schema(connection: sqlite3.Connection) -> None:
+    def _prepare_schema(connection: sqlite3.Connection) -> None:
         version = connection.execute("PRAGMA user_version").fetchone()[0]
+        if version == 1:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    "ALTER TABLE campaign ADD COLUMN planner_mode "
+                    "TEXT NOT NULL DEFAULT 'affine'"
+                )
+                connection.execute(
+                    "ALTER TABLE campaign ADD COLUMN planner_state TEXT"
+                )
+                connection.execute(
+                    "ALTER TABLE work ADD COLUMN strategy_lane "
+                    "TEXT NOT NULL DEFAULT 'affine'"
+                )
+                connection.execute(
+                    "ALTER TABLE work ADD COLUMN strategy_rank INTEGER"
+                )
+                connection.execute(
+                    "UPDATE work SET strategy_rank = sequence "
+                    "WHERE strategy_rank IS NULL"
+                )
+                connection.execute(
+                    "UPDATE campaign SET schema_version = ? WHERE id = 1",
+                    (SCHEMA_VERSION,),
+                )
+                connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+                connection.commit()
+                version = SCHEMA_VERSION
+            except BaseException:
+                connection.rollback()
+                raise
         if version != SCHEMA_VERSION:
             raise CoordinatorError(
                 f"unsupported coordinator schema {version}; expected {SCHEMA_VERSION}"
@@ -266,6 +341,17 @@ class Coordinator:
             or int(row["end_hex"], 16) != puzzle.end
         ):
             raise CoordinatorError("database target does not match the reviewed registry")
+        if row["schema_version"] != SCHEMA_VERSION:
+            raise CoordinatorError("campaign schema marker is inconsistent")
+        if row["planner_mode"] not in {"affine", "mosaic"}:
+            raise CoordinatorError("campaign planner mode is invalid")
+        if row["planner_mode"] == "mosaic":
+            try:
+                state = json.loads(row["planner_state"])
+                planner = MosaicPlanner(row["total_chunks"], seed=row["seed"])
+                planner.restore(state)
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise CoordinatorError("campaign MOSAIC state is invalid") from exc
         return row
 
     @staticmethod
@@ -275,6 +361,33 @@ class Coordinator:
             chunk_size=campaign["chunk_size"],
             seed=campaign["seed"],
         )
+
+    @staticmethod
+    def _allocate_chunk(
+        connection: sqlite3.Connection,
+        campaign: sqlite3.Row,
+        sequence: int,
+    ) -> tuple[KeyChunk, str, int, str | None]:
+        if campaign["planner_mode"] == "affine":
+            chunk = Coordinator._plan(campaign).chunk_for_sequence(sequence)
+            return chunk, "affine", sequence, None
+
+        planner = MosaicPlanner(campaign["total_chunks"], seed=campaign["seed"])
+        planner.restore(json.loads(campaign["planner_state"]))
+        candidate = planner.next_unseen(_SQLiteSeen(connection))
+        puzzle = get_puzzle(campaign["puzzle"])
+        start = puzzle.start + candidate.chunk_id * campaign["chunk_size"]
+        end = min(start + campaign["chunk_size"] - 1, puzzle.end)
+        chunk = KeyChunk(
+            ordinal=sequence,
+            chunk_id=candidate.chunk_id,
+            start=start,
+            end=end,
+        )
+        state = json.dumps(
+            planner.state(), separators=(",", ":"), sort_keys=True
+        )
+        return chunk, candidate.lane, candidate.lane_rank, state
 
     @staticmethod
     def _reclaim_expired(
@@ -350,13 +463,16 @@ class Coordinator:
                         self._mark_exhausted_if_done(connection, campaign, now_text)
                         connection.commit()
                         return None
-                    chunk = self._plan(campaign).chunk_for_sequence(sequence)
+                    chunk, strategy_lane, strategy_rank, planner_state = (
+                        self._allocate_chunk(connection, campaign, sequence)
+                    )
                     cursor = connection.execute(
                         """
                         INSERT INTO work (
                             sequence, ordinal, chunk_id, start_hex, end_hex, size,
-                            state, attempts, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, 'available', 0, ?, ?)
+                            state, attempts, strategy_lane, strategy_rank,
+                            created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, 'available', 0, ?, ?, ?, ?)
                         """,
                         (
                             sequence,
@@ -365,13 +481,19 @@ class Coordinator:
                             f"{chunk.start:x}",
                             f"{chunk.end:x}",
                             chunk.size,
+                            strategy_lane,
+                            strategy_rank,
                             now_text,
                             now_text,
                         ),
                     )
                     connection.execute(
-                        "UPDATE campaign SET next_sequence = ?, updated_at = ? WHERE id = 1",
-                        (sequence + 1, now_text),
+                        """
+                        UPDATE campaign
+                           SET next_sequence = ?, planner_state = ?, updated_at = ?
+                         WHERE id = 1
+                        """,
+                        (sequence + 1, planner_state, now_text),
                     )
                     row = connection.execute(
                         "SELECT * FROM work WHERE id = ?", (cursor.lastrowid,)
@@ -402,6 +524,8 @@ class Coordinator:
                     start_hex=row["start_hex"],
                     end_hex=row["end_hex"],
                     keys=row["size"],
+                    strategy_lane=row["strategy_lane"],
+                    strategy_rank=row["strategy_rank"],
                     expires_at=expires_at,
                 )
             except BaseException:
@@ -657,6 +781,14 @@ class Coordinator:
                       FROM work
                     """
                 ).fetchone()
+                strategy_rows = connection.execute(
+                    """
+                    SELECT strategy_lane, state, COUNT(*) AS count
+                      FROM work
+                     GROUP BY strategy_lane, state
+                     ORDER BY strategy_lane, state
+                    """
+                ).fetchall()
                 connection.commit()
             except BaseException:
                 connection.rollback()
@@ -673,11 +805,19 @@ class Coordinator:
                 Decimal(1) - (Decimal(1) / total_decimal)
             ) ** checked
             no_repeat_advantage = unique_probability - random_probability
+        strategy_lanes: dict[str, dict[str, int]] = {}
+        for row in strategy_rows:
+            lane = strategy_lanes.setdefault(
+                row["strategy_lane"],
+                {"available": 0, "leased": 0, "completed": 0},
+            )
+            lane[row["state"]] = row["count"]
         return {
             "schema_version": campaign["schema_version"],
             "puzzle": puzzle.number,
             "address": puzzle.address,
             "state": campaign["state"],
+            "planner_mode": campaign["planner_mode"],
             "seed": campaign["seed"],
             "chunk_size": campaign["chunk_size"],
             "total_chunks": campaign["total_chunks"],
@@ -694,6 +834,7 @@ class Coordinator:
             "reclaimed_leases": campaign["reclaimed_leases"],
             "worker_failures": campaign["total_failures"],
             "average_reported_rate": metrics["average_rate"] or 0.0,
+            "strategy_lanes": strategy_lanes,
             "found_key_hex": campaign["found_key_hex"],
             "created_at": campaign["created_at"],
             "updated_at": campaign["updated_at"],
