@@ -15,6 +15,8 @@ broadcaster.
 - deterministic, non-overlapping, pseudo-random chunk allocation;
 - parallel CPU reference scanner with resumable atomic checkpoints;
 - strict cuBitCrack/clBitCrack adapter with independent result verification;
+- local-first GPU profile with validation, auto-tuning, adaptive durable chunks,
+  and one-command resume;
 - SQLite coordinator with transactional leases and automatic expired-work recovery;
 - authenticated HTTP worker protocol for many remote GPU machines;
 - exact coverage accounting and a random-with-replacement comparison;
@@ -39,6 +41,30 @@ puzzleforge inspect 71
 puzzleforge plan 71 --chunk-size 0x100000 --seed furnes
 puzzleforge estimate 71 --rate 1500000000
 ```
+
+## Local-first mode
+
+The default practical path is one owned GPU. `local-setup` finds BitCrack,
+proves the full path against solved puzzle #8, benchmarks tuning profiles,
+chooses a checkpoint chunk sized for roughly five minutes, and creates one
+durable local campaign:
+
+```bash
+puzzleforge local-setup --binary ./cuBitCrack --puzzle 71
+puzzleforge local-run
+```
+
+Stop with Ctrl+C and start `local-run` again later. Completed chunks are never
+repeated, while an interrupted or failed chunk is returned to the retry queue.
+The measured flags are loaded automatically; they do not have to be copied
+into each command.
+
+```bash
+puzzleforge local-status
+```
+
+Use `--benchmark-profile full` for a longer tune or `--chunk-seconds 600` to
+reduce checkpoint frequency. See [docs/LOCAL_FIRST.md](docs/LOCAL_FIRST.md).
 
 Validate an installed GPU engine against solved puzzle #8. A correct run finds
 the known `0xe0` test value and independently derives the registered address:
@@ -148,7 +174,7 @@ This is research infrastructure, not a claimed shortcut. A different ordering
 can help only if a tested non-uniform prior exists. See
 [docs/MOSAIC.md](docs/MOSAIC.md).
 
-## Elastic cloud planning
+## Optional elastic cloud planning
 
 Fetch current offers without renting anything, then build a dry-run plan from
 measured rates and explicit budgets:

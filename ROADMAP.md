@@ -21,10 +21,13 @@
 
 - [x] cuBitCrack/clBitCrack capability probe and strict execution adapter
 - [x] Reproducible GPU benchmark and auto-tuning harness
+- [x] Local-first setup, adaptive checkpoint chunks, and one-command resume
 - [ ] CUDA secp256k1 point-walk kernel
 - [ ] Batched HASH160 target comparison on device
 - [ ] Multi-GPU scheduling and thermal/power telemetry
 - [ ] Checkpoint-safe kernel boundaries
+- [ ] Temperature, power, and throttling guard for long local sessions
+- [ ] Lightweight local web dashboard and desktop launcher
 
 ## M3 — distributed search
 

@@ -271,7 +271,6 @@ def command_gpu_benchmark(args: argparse.Namespace) -> int:
         puzzle_number=args.puzzle,
         chunk_size=args.chunk_size,
         seed=args.seed,
-        planner_mode=args.mode,
         sequence=args.sequence,
         repeats=args.repeats,
         profiles=tuning_profiles(args.profile, args.device),
@@ -296,6 +295,150 @@ def command_gpu_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_local_setup(args: argparse.Namespace) -> int:
+    from .benchmark import (
+        run_benchmark,
+        save_report,
+        tuning_profiles,
+        validate_known_puzzle,
+    )
+    from .coordinator import Coordinator
+    from .engine import BitCrackEngine, EngineTuning
+    from .local import (
+        LocalProfile,
+        find_bitcrack_binary,
+        recommended_chunk_size,
+        save_profile,
+        utc_now,
+    )
+
+    state_dir = args.state_dir.expanduser().resolve()
+    profile_path = state_dir / "profile.json"
+    database_path = state_dir / "campaign.sqlite3"
+    benchmark_path = state_dir / "benchmark.json"
+    existing = [
+        path for path in (profile_path, database_path, benchmark_path) if path.exists()
+    ]
+    if existing:
+        raise FileExistsError(
+            f"local setup already exists at {state_dir}; use local-run to resume"
+        )
+
+    binary = find_bitcrack_binary(args.binary)
+    validation_engine = BitCrackEngine(
+        binary,
+        EngineTuning(device=args.device),
+        timeout_seconds=args.engine_timeout,
+    )
+    device_probe = validation_engine.probe()
+    validate_known_puzzle(validation_engine)
+    report = run_benchmark(
+        puzzle_number=args.puzzle,
+        chunk_size=args.benchmark_chunk_size,
+        seed=args.seed,
+        sequence=0,
+        repeats=args.repeats,
+        profiles=tuning_profiles(args.benchmark_profile, args.device),
+        engine_factory=lambda tuning: BitCrackEngine(
+            binary,
+            tuning,
+            timeout_seconds=args.engine_timeout,
+        ),
+        binary_name=binary.name,
+        device_probe=device_probe,
+    )
+    if report.best is None:
+        raise RuntimeError("no local tuning profile completed successfully")
+
+    state_dir.mkdir(parents=True, exist_ok=True)
+    save_report(benchmark_path, report)
+    puzzle = get_puzzle(args.puzzle)
+    chunk_size = recommended_chunk_size(
+        report.best.median_keys_per_second,
+        args.chunk_seconds,
+        maximum_keys=min(puzzle.size, (1 << 63) - 1),
+    )
+    Coordinator.initialize(
+        database_path,
+        puzzle_number=args.puzzle,
+        chunk_size=chunk_size,
+        seed=args.seed,
+        planner_mode=args.mode,
+    )
+    profile = LocalProfile(
+        schema=1,
+        puzzle=args.puzzle,
+        binary=str(binary),
+        tuning=report.best.tuning,
+        measured_rate_keys_per_second=report.best.median_keys_per_second,
+        benchmark_relative_spread=report.best.relative_spread,
+        chunk_size=chunk_size,
+        target_chunk_seconds=args.chunk_seconds,
+        planner_mode=args.mode,
+        seed=args.seed,
+        database=str(database_path),
+        benchmark_report=str(benchmark_path),
+        device_probe=device_probe,
+        created_at=utc_now(),
+    )
+    save_profile(profile_path, profile)
+
+    print(f"Local profile: {profile_path}")
+    print(f"GPU rate:      {profile.measured_rate_keys_per_second:,.0f} keys/s")
+    print(f"Chunk target:  {profile.chunk_size:,} keys")
+    print("Validation:    PASS (solved puzzle #8)")
+    return 0
+
+
+def command_local_run(args: argparse.Namespace) -> int:
+    from .local import engine_from_profile, load_profile, run_local_once
+
+    profile = load_profile(args.profile)
+    engine = engine_from_profile(profile, timeout_seconds=args.engine_timeout)
+    completed = 0
+    try:
+        while args.max_chunks is None or completed < args.max_chunks:
+            result = run_local_once(
+                profile,
+                engine,
+                worker=args.worker,
+                lease_seconds=args.lease_seconds,
+            )
+            print(result.message, flush=True)
+            if result.found:
+                return 0
+            if result.outcome == "complete":
+                completed += 1
+                continue
+            if result.outcome == "idle":
+                return 0
+            return 1
+    except KeyboardInterrupt:
+        print("Local run stopped; unfinished work was returned to the queue.")
+        return 130
+    return 0
+
+
+def command_local_status(args: argparse.Namespace) -> int:
+    from .coordinator import Coordinator
+    from .local import load_profile
+
+    profile = load_profile(args.profile)
+    payload = {
+        "local": {
+            "binary": profile.binary,
+            "tuning": asdict(profile.tuning),
+            "measured_rate_keys_per_second": profile.measured_rate_keys_per_second,
+            "chunk_size": profile.chunk_size,
+            "target_chunk_seconds": profile.target_chunk_seconds,
+            "benchmark_relative_spread": profile.benchmark_relative_spread,
+        },
+        "campaign": Coordinator(Path(profile.database)).status(),
+    }
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
 def command_coordinator_init(args: argparse.Namespace) -> int:
     from .coordinator import Coordinator
 
@@ -304,6 +447,7 @@ def command_coordinator_init(args: argparse.Namespace) -> int:
         puzzle_number=args.puzzle,
         chunk_size=args.chunk_size,
         seed=args.seed,
+        planner_mode=args.mode,
     )
     print(json.dumps(coordinator.status(), indent=2, sort_keys=True))
     return 0
@@ -575,6 +719,63 @@ def build_parser() -> argparse.ArgumentParser:
     gpu_benchmark_parser.add_argument("--repeats", type=positive_integer, default=2)
     gpu_benchmark_parser.add_argument("--output", type=Path)
     gpu_benchmark_parser.set_defaults(handler=command_gpu_benchmark)
+
+    local_setup_parser = subparsers.add_parser(
+        "local-setup",
+        help="validate, auto-tune, and create a resumable single-GPU campaign",
+    )
+    local_setup_parser.add_argument(
+        "--state-dir", type=Path, default=Path(".puzzleforge/local")
+    )
+    local_setup_parser.add_argument("--binary", type=Path)
+    local_setup_parser.add_argument("--device", type=nonnegative_integer, default=0)
+    local_setup_parser.add_argument("--engine-timeout", type=float)
+    local_setup_parser.add_argument(
+        "--puzzle",
+        type=int,
+        choices=[p.number for p in puzzles() if p.status == "unsolved"],
+        default=71,
+    )
+    local_setup_parser.add_argument(
+        "--benchmark-profile", choices=("quick", "balanced", "full"), default="quick"
+    )
+    local_setup_parser.add_argument("--repeats", type=positive_integer, default=2)
+    local_setup_parser.add_argument(
+        "--benchmark-chunk-size", type=positive_integer, default=1 << 30
+    )
+    local_setup_parser.add_argument(
+        "--chunk-seconds",
+        type=positive_integer,
+        default=300,
+        help="target runtime per durable checkpoint chunk",
+    )
+    local_setup_parser.add_argument(
+        "--mode", choices=("affine", "mosaic"), default="affine"
+    )
+    local_setup_parser.add_argument("--seed", default="puzzleforge-local-v1")
+    local_setup_parser.set_defaults(handler=command_local_setup)
+
+    local_run_parser = subparsers.add_parser(
+        "local-run", help="run or resume the auto-tuned local GPU campaign"
+    )
+    local_run_parser.add_argument(
+        "--profile", type=Path, default=Path(".puzzleforge/local/profile.json")
+    )
+    local_run_parser.add_argument("--worker", default="local-gpu-0")
+    local_run_parser.add_argument(
+        "--lease-seconds", type=positive_integer, default=3_600
+    )
+    local_run_parser.add_argument("--max-chunks", type=positive_integer)
+    local_run_parser.add_argument("--engine-timeout", type=float)
+    local_run_parser.set_defaults(handler=command_local_run)
+
+    local_status_parser = subparsers.add_parser(
+        "local-status", help="show local GPU tuning and exact durable progress"
+    )
+    local_status_parser.add_argument(
+        "--profile", type=Path, default=Path(".puzzleforge/local/profile.json")
+    )
+    local_status_parser.set_defaults(handler=command_local_status)
 
     coordinator_init_parser = subparsers.add_parser(
         "coordinator-init", help="create a distributed campaign database"

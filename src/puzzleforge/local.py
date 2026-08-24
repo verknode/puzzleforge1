@@ -1,0 +1,318 @@
+from __future__ import annotations
+
+import json
+import math
+import os
+import shutil
+import tempfile
+import threading
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Mapping, Protocol
+
+from .coordinator import Coordinator, LeaseRejected, SQLITE_MAX_INTEGER
+from .engine import BitCrackEngine, EngineOutcome, EngineTuning
+from .registry import get_puzzle
+
+
+PROFILE_SCHEMA = 1
+CHUNK_ALIGNMENT = 1 << 20
+
+
+class LocalEngine(Protocol):
+    def scan(self, puzzle, chunk) -> EngineOutcome: ...
+
+
+@dataclass(frozen=True, slots=True)
+class LocalProfile:
+    schema: int
+    puzzle: int
+    binary: str
+    tuning: EngineTuning
+    measured_rate_keys_per_second: float
+    benchmark_relative_spread: float
+    chunk_size: int
+    target_chunk_seconds: int
+    planner_mode: str
+    seed: str
+    database: str
+    benchmark_report: str
+    device_probe: str
+    created_at: str
+
+    def __post_init__(self) -> None:
+        if self.schema != PROFILE_SCHEMA:
+            raise ValueError(f"unsupported local profile schema: {self.schema}")
+        get_puzzle(self.puzzle)
+        if not self.binary:
+            raise ValueError("local profile binary path is empty")
+        if not math.isfinite(self.measured_rate_keys_per_second) or (
+            self.measured_rate_keys_per_second <= 0
+        ):
+            raise ValueError("local profile measured rate must be positive")
+        if not math.isfinite(self.benchmark_relative_spread) or not (
+            0 <= self.benchmark_relative_spread
+        ):
+            raise ValueError("local profile benchmark spread is invalid")
+        if not 1 <= self.chunk_size <= SQLITE_MAX_INTEGER:
+            raise ValueError("local profile chunk size is invalid")
+        if not 10 <= self.target_chunk_seconds <= 86_400:
+            raise ValueError("local profile target chunk duration is invalid")
+        if self.planner_mode not in {"affine", "mosaic"}:
+            raise ValueError("local profile planner mode is invalid")
+        if not self.seed:
+            raise ValueError("local profile seed is empty")
+        if not self.database or not self.benchmark_report:
+            raise ValueError("local profile state paths are empty")
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: object) -> "LocalProfile":
+        if not isinstance(payload, dict):
+            raise ValueError("local profile must be a JSON object")
+        tuning = payload.get("tuning")
+        if not isinstance(tuning, dict):
+            raise ValueError("local profile tuning is missing")
+        try:
+            return cls(
+                schema=int(payload["schema"]),
+                puzzle=int(payload["puzzle"]),
+                binary=str(payload["binary"]),
+                tuning=EngineTuning(
+                    device=_optional_int(tuning.get("device")),
+                    blocks=_optional_int(tuning.get("blocks")),
+                    threads=_optional_int(tuning.get("threads")),
+                    points=_optional_int(tuning.get("points")),
+                ),
+                measured_rate_keys_per_second=float(
+                    payload["measured_rate_keys_per_second"]
+                ),
+                benchmark_relative_spread=float(
+                    payload["benchmark_relative_spread"]
+                ),
+                chunk_size=int(payload["chunk_size"]),
+                target_chunk_seconds=int(payload["target_chunk_seconds"]),
+                planner_mode=str(payload["planner_mode"]),
+                seed=str(payload["seed"]),
+                database=str(payload["database"]),
+                benchmark_report=str(payload["benchmark_report"]),
+                device_probe=str(payload.get("device_probe", "")),
+                created_at=str(payload["created_at"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"invalid local profile: {exc}") from exc
+
+
+@dataclass(frozen=True, slots=True)
+class LocalRun:
+    outcome: str
+    message: str
+    found: bool = False
+
+
+def utc_now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def recommended_chunk_size(
+    rate_keys_per_second: float,
+    target_seconds: int,
+    *,
+    maximum_keys: int = SQLITE_MAX_INTEGER,
+) -> int:
+    rate = float(rate_keys_per_second)
+    if not math.isfinite(rate) or rate <= 0:
+        raise ValueError("measured rate must be positive")
+    if isinstance(target_seconds, bool) or not 10 <= target_seconds <= 86_400:
+        raise ValueError("target chunk duration must be 10-86400 seconds")
+    if isinstance(maximum_keys, bool) or not 1 <= maximum_keys <= SQLITE_MAX_INTEGER:
+        raise ValueError("maximum_keys must fit a positive SQLite integer")
+
+    raw = max(1, int(rate * target_seconds))
+    if raw < CHUNK_ALIGNMENT:
+        return min(raw, maximum_keys)
+    aligned = (raw // CHUNK_ALIGNMENT) * CHUNK_ALIGNMENT
+    return min(max(aligned, CHUNK_ALIGNMENT), maximum_keys)
+
+
+def find_bitcrack_binary(
+    explicit: Path | None = None,
+    *,
+    environment: Mapping[str, str] | None = None,
+    working_directory: Path | None = None,
+) -> Path:
+    environment = os.environ if environment is None else environment
+    working_directory = Path.cwd() if working_directory is None else working_directory
+
+    if explicit is not None:
+        resolved = explicit.expanduser().resolve()
+        if not resolved.is_file():
+            raise FileNotFoundError(f"BitCrack binary not found: {resolved}")
+        return resolved
+
+    candidates: list[Path] = []
+    configured = environment.get("PUZZLEFORGE_BITCRACK")
+    if configured:
+        candidates.append(Path(configured).expanduser())
+
+    names = ("cuBitCrack", "cuBitCrack.exe", "clBitCrack", "clBitCrack.exe")
+    for name in names:
+        candidates.extend(
+            (
+                working_directory / name,
+                working_directory / ".puzzleforge" / "bin" / name,
+            )
+        )
+        located = shutil.which(name, path=environment.get("PATH"))
+        if located:
+            candidates.append(Path(located))
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.expanduser().resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved.is_file():
+            return resolved
+    raise FileNotFoundError(
+        "BitCrack binary was not found; use --binary or PUZZLEFORGE_BITCRACK"
+    )
+
+
+def save_profile(path: Path, profile: LocalProfile) -> None:
+    path = path.expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(profile.to_dict(), indent=2, sort_keys=True) + "\n"
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def load_profile(path: Path) -> LocalProfile:
+    try:
+        payload = json.loads(path.expanduser().read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"local profile contains invalid JSON: {exc}") from exc
+    return LocalProfile.from_dict(payload)
+
+
+def engine_from_profile(
+    profile: LocalProfile, *, timeout_seconds: float | None = None
+) -> BitCrackEngine:
+    return BitCrackEngine(
+        Path(profile.binary),
+        profile.tuning,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def run_local_once(
+    profile: LocalProfile,
+    engine: LocalEngine,
+    *,
+    worker: str,
+    lease_seconds: int = 3_600,
+) -> LocalRun:
+    coordinator = Coordinator(Path(profile.database))
+    lease = coordinator.lease(worker, lease_seconds=lease_seconds)
+    if lease is None:
+        state = coordinator.status()["state"]
+        return LocalRun("idle", f"no work available; campaign state={state}")
+
+    puzzle = get_puzzle(lease.puzzle)
+    stopped = threading.Event()
+    heartbeat_errors: list[BaseException] = []
+    interval = max(5.0, min(60.0, lease_seconds / 3))
+
+    def heartbeat_loop() -> None:
+        while not stopped.wait(interval):
+            try:
+                coordinator.heartbeat(
+                    lease.token,
+                    lease.worker,
+                    lease_seconds=lease_seconds,
+                )
+            except BaseException as exc:
+                heartbeat_errors.append(exc)
+                return
+
+    heartbeat = threading.Thread(
+        target=heartbeat_loop,
+        name="puzzleforge-local-heartbeat",
+        daemon=True,
+    )
+    heartbeat.start()
+    try:
+        outcome = engine.scan(puzzle, lease.chunk)
+    except BaseException:
+        stopped.set()
+        heartbeat.join(timeout=interval + 1)
+        _release_failed_lease(coordinator, lease.token, lease.worker, "local run interrupted")
+        raise
+    finally:
+        stopped.set()
+    heartbeat.join(timeout=interval + 1)
+
+    if heartbeat_errors:
+        _release_failed_lease(
+            coordinator,
+            lease.token,
+            lease.worker,
+            f"local lease heartbeat failed: {heartbeat_errors[0]}",
+        )
+        raise RuntimeError(f"local lease heartbeat failed: {heartbeat_errors[0]}")
+
+    if outcome.status == "error":
+        coordinator.fail(lease.token, lease.worker, error=outcome.message)
+        return LocalRun("error", outcome.message)
+
+    completion = coordinator.complete(
+        lease.token,
+        lease.worker,
+        checked=outcome.checked,
+        found_key_hex=(
+            None if outcome.found_key is None else f"{outcome.found_key:064x}"
+        ),
+        elapsed_seconds=outcome.elapsed_seconds,
+        rate_keys_per_second=outcome.rate_keys_per_second,
+    )
+    return LocalRun(
+        "found" if completion.found else "complete",
+        (
+            f"chunk {lease.sequence} checked {outcome.checked:,} keys at "
+            f"{outcome.rate_keys_per_second:,.0f} keys/s"
+        ),
+        found=completion.found,
+    )
+
+
+def _release_failed_lease(
+    coordinator: Coordinator, token: str, worker: str, error: str
+) -> None:
+    try:
+        coordinator.fail(token, worker, error=error)
+    except LeaseRejected:
+        pass
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError("boolean is not a valid tuning integer")
+    return int(value)
