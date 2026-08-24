@@ -53,6 +53,29 @@ Inspect exact progress and the active measured tuning:
 puzzleforge local-status
 ```
 
+## Visual dashboard
+
+The dashboard is a separate read-only process, so rendering and browser refresh
+do not share the GPU work loop:
+
+```bash
+puzzleforge local-dashboard
+```
+
+It displays measured speed, exact unique coverage, chunk/failure counters, and
+cached `nvidia-smi` telemetry for load, temperature, power, clock, and memory.
+The browser polls every three seconds and the GPU telemetry command is cached.
+
+For a phone on the same trusted LAN:
+
+```bash
+puzzleforge local-dashboard --host 0.0.0.0 --port 8788
+```
+
+Open `http://COMPUTER_LOCAL_IP:8788` on the phone. The dashboard has no mutation
+endpoints, but binding beyond localhost exposes campaign statistics to that
+network, so it should not be forwarded directly to the public internet.
+
 ## Tuning controls
 
 The default quick benchmark is intended for first use:
@@ -72,7 +95,7 @@ benchmarking because the control range is intentionally repeated.
 
 ## Multiple owned GPUs
 
-Version 0.6 focuses on a reliable single-device path. Multiple cards can still
+Version 0.7 focuses on a reliable single-device path. Multiple cards can still
 use the existing coordinator/worker commands. Native local multi-GPU launch,
 per-device thermal limits, and a lightweight dashboard are the next local-first
 milestones.

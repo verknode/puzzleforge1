@@ -439,6 +439,20 @@ def command_local_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_local_dashboard(args: argparse.Namespace) -> int:
+    from .dashboard import serve_dashboard
+
+    print(f"Dashboard: http://{args.host}:{args.port}")
+    if args.host not in {"127.0.0.1", "localhost", "::1"}:
+        print("Read-only dashboard is visible to the connected network.")
+    try:
+        serve_dashboard(args.profile, host=args.host, port=args.port)
+    except KeyboardInterrupt:
+        print("Dashboard stopped.")
+        return 130
+    return 0
+
+
 def command_coordinator_init(args: argparse.Namespace) -> int:
     from .coordinator import Coordinator
 
@@ -776,6 +790,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile", type=Path, default=Path(".puzzleforge/local/profile.json")
     )
     local_status_parser.set_defaults(handler=command_local_status)
+
+    local_dashboard_parser = subparsers.add_parser(
+        "local-dashboard", help="serve a lightweight read-only local GPU dashboard"
+    )
+    local_dashboard_parser.add_argument(
+        "--profile", type=Path, default=Path(".puzzleforge/local/profile.json")
+    )
+    local_dashboard_parser.add_argument("--host", default="127.0.0.1")
+    local_dashboard_parser.add_argument("--port", type=positive_integer, default=8788)
+    local_dashboard_parser.set_defaults(handler=command_local_dashboard)
 
     coordinator_init_parser = subparsers.add_parser(
         "coordinator-init", help="create a distributed campaign database"

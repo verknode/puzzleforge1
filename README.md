@@ -17,6 +17,8 @@ broadcaster.
 - strict cuBitCrack/clBitCrack adapter with independent result verification;
 - local-first GPU profile with validation, auto-tuning, adaptive durable chunks,
   and one-command resume;
+- lightweight mobile-friendly dashboard with cached NVIDIA load, temperature,
+  power, memory, speed, and exact coverage telemetry;
 - SQLite coordinator with transactional leases and automatic expired-work recovery;
 - authenticated HTTP worker protocol for many remote GPU machines;
 - exact coverage accounting and a random-with-replacement comparison;
@@ -61,6 +63,19 @@ into each command.
 
 ```bash
 puzzleforge local-status
+```
+
+Run the read-only dashboard in a second terminal:
+
+```bash
+puzzleforge local-dashboard
+```
+
+To view it from a phone on the same trusted network, bind to the computer's LAN
+interface and open port 8788 using the computer's local IP:
+
+```bash
+puzzleforge local-dashboard --host 0.0.0.0
 ```
 
 Use `--benchmark-profile full` for a longer tune or `--chunk-seconds 600` to
