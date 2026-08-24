@@ -31,3 +31,11 @@ this repository using an independently reviewed operational-security plan.
 - Treat the SQLite database as sensitive operational state and back it up.
 - Do not expose the coordinator directly to the public internet without a
   maintained TLS reverse proxy, access controls, and request monitoring.
+
+## Cloud credentials and spending
+
+- Provider tokens are read from `VAST_API_KEY` or `RUNPOD_API_KEY`; never place
+  them in command arguments, reports, coordinator leases, or worker images.
+- `cloud-catalog` is read-only and `cloud-plan` is always a dry-run in v0.5.
+- Paid provisioning must not be implemented without immutable plan expiry,
+  explicit charge limits, double confirmation, and automatic termination tests.

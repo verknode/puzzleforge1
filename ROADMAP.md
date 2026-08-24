@@ -41,9 +41,10 @@
 - [x] Persist MOSAIC lane cursors in the lease coordinator
 - [ ] Holdout backtests on solved challenge vectors and uniform controls
 - [ ] Automatic rejection of strategies without measurable lift
-- [ ] Vast.ai and RunPod provider adapters
-- [ ] Price/performance qualification before a cloud worker joins
-- [ ] Hard hourly/daily budget caps and automatic instance termination
+- [x] Read-only Vast.ai and RunPod catalog adapters
+- [x] Measured price/performance qualification and dry-run selection
+- [x] Hard hourly/daily budget policy before any provisioning
+- [ ] Explicit two-phase paid provisioning and automatic termination
 - [ ] Spot/preemption recovery through the existing lease protocol
 
 ## Merge rules

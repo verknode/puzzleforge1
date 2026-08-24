@@ -372,6 +372,97 @@ def command_gpu_worker(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_cloud_catalog(args: argparse.Namespace) -> int:
+    from .cloud import save_json_atomic
+    from .cloud_providers import RunPodClient, VastClient
+
+    token_env = args.token_env or (
+        "VAST_API_KEY" if args.provider == "vast" else "RUNPOD_API_KEY"
+    )
+    token = _token_from_environment(token_env)
+    if args.provider == "vast":
+        offers = VastClient(token).search_offers(
+            gpu_models=tuple(args.gpu),
+            interruptible=not args.on_demand,
+            minimum_reliability=args.min_reliability,
+            limit=args.limit,
+        )
+    else:
+        offers = RunPodClient(token).catalog_offers(
+            cloud="COMMUNITY" if args.community else "SECURE",
+            minimum_cuda=args.minimum_cuda,
+            countries=tuple(args.country),
+        )
+        if args.gpu:
+            wanted = {value.upper() for value in args.gpu}
+            offers = [
+                offer
+                for offer in offers
+                if offer.gpu_model.upper() in wanted
+                or offer.offer_id.split(":", 1)[0].upper() in wanted
+            ]
+    payload = {
+        "schema": 1,
+        "read_only": True,
+        "provider": args.provider,
+        "offers": [offer.to_dict() for offer in offers],
+    }
+    if args.output:
+        save_json_atomic(args.output, payload)
+        print(f"Catalog: {args.output}")
+        print(f"Offers:  {len(offers)}")
+    else:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def _benchmark_rate(value: str) -> tuple[str, float]:
+    model, separator, raw_rate = value.rpartition("=")
+    if not separator or not model.strip():
+        raise argparse.ArgumentTypeError("rate must use GPU_MODEL=KEYS_PER_SECOND")
+    try:
+        rate = float(raw_rate.replace("_", ""))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("benchmark rate must be a number") from exc
+    if rate <= 0:
+        raise argparse.ArgumentTypeError("benchmark rate must be positive")
+    return model.strip(), rate
+
+
+def command_cloud_plan(args: argparse.Namespace) -> int:
+    from .cloud import BenchmarkRate, CloudOffer, CloudPolicy, plan_capacity
+
+    raw = json.loads(args.catalog.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict) or not isinstance(raw.get("offers"), list):
+        raise ValueError("cloud catalog must contain an offers array")
+    offers = [CloudOffer.from_dict(item) for item in raw["offers"]]
+    benchmarks = [BenchmarkRate(model, rate) for model, rate in args.rate]
+    policy = CloudPolicy(
+        max_instances=args.max_instances,
+        max_total_hourly_usd=args.max_total_hourly,
+        max_daily_usd=args.max_daily,
+        max_offer_hourly_usd=args.max_offer_hourly,
+        max_cost_per_quadrillion_usd=args.max_cost_per_quadrillion,
+        min_reliability=args.min_reliability,
+        max_benchmark_spread=args.max_benchmark_spread,
+        allow_interruptible=not args.no_interruptible,
+        require_verified=not args.allow_unverified,
+        allow_unknown_reliability=args.allow_unknown_reliability,
+    )
+    plan = plan_capacity(
+        puzzle_number=args.puzzle,
+        offers=offers,
+        benchmarks=benchmarks,
+        policy=policy,
+        running_instances=args.running_instances,
+        running_hourly_usd=args.running_hourly,
+        spent_today_usd=args.spent_today,
+        hours_remaining_today=args.hours_remaining,
+    )
+    print(json.dumps(plan.to_dict(), indent=2, sort_keys=True))
+    return 0
+
+
 def add_plan_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("puzzle", type=int, choices=[p.number for p in puzzles()])
     parser.add_argument("--chunk-size", type=positive_integer, default=100_000)
@@ -533,6 +624,53 @@ def build_parser() -> argparse.ArgumentParser:
     gpu_worker_parser.add_argument("--allow-insecure-http", action="store_true")
     add_engine_arguments(gpu_worker_parser)
     gpu_worker_parser.set_defaults(handler=command_gpu_worker)
+
+    cloud_catalog_parser = subparsers.add_parser(
+        "cloud-catalog", help="read current GPU offers without renting anything"
+    )
+    cloud_catalog_parser.add_argument("provider", choices=("vast", "runpod"))
+    cloud_catalog_parser.add_argument("--token-env")
+    cloud_catalog_parser.add_argument("--gpu", action="append", default=[])
+    cloud_catalog_parser.add_argument("--country", action="append", default=[])
+    cloud_catalog_parser.add_argument("--minimum-cuda", default="11.8")
+    cloud_catalog_parser.add_argument("--min-reliability", type=float, default=0.98)
+    cloud_catalog_parser.add_argument("--limit", type=positive_integer, default=100)
+    cloud_catalog_parser.add_argument("--on-demand", action="store_true")
+    cloud_catalog_parser.add_argument("--community", action="store_true")
+    cloud_catalog_parser.add_argument("--output", type=Path)
+    cloud_catalog_parser.set_defaults(handler=command_cloud_catalog)
+
+    cloud_plan_parser = subparsers.add_parser(
+        "cloud-plan", help="build a budget-capped dry-run capacity plan"
+    )
+    cloud_plan_parser.add_argument("catalog", type=Path)
+    cloud_plan_parser.add_argument(
+        "--puzzle", type=int, choices=[p.number for p in puzzles()], default=71
+    )
+    cloud_plan_parser.add_argument(
+        "--rate", type=_benchmark_rate, action="append", required=True
+    )
+    cloud_plan_parser.add_argument("--max-instances", type=positive_integer, default=1)
+    cloud_plan_parser.add_argument("--max-total-hourly", type=float, required=True)
+    cloud_plan_parser.add_argument("--max-daily", type=float, required=True)
+    cloud_plan_parser.add_argument("--max-offer-hourly", type=float, required=True)
+    cloud_plan_parser.add_argument(
+        "--max-cost-per-quadrillion", type=float, required=True
+    )
+    cloud_plan_parser.add_argument("--min-reliability", type=float, default=0.98)
+    cloud_plan_parser.add_argument(
+        "--max-benchmark-spread", type=float, default=0.20
+    )
+    cloud_plan_parser.add_argument("--allow-unknown-reliability", action="store_true")
+    cloud_plan_parser.add_argument("--allow-unverified", action="store_true")
+    cloud_plan_parser.add_argument("--no-interruptible", action="store_true")
+    cloud_plan_parser.add_argument(
+        "--running-instances", type=nonnegative_integer, default=0
+    )
+    cloud_plan_parser.add_argument("--running-hourly", type=float, default=0.0)
+    cloud_plan_parser.add_argument("--spent-today", type=float, default=0.0)
+    cloud_plan_parser.add_argument("--hours-remaining", type=float, default=24.0)
+    cloud_plan_parser.set_defaults(handler=command_cloud_plan)
     return parser
 
 

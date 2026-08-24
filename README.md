@@ -18,6 +18,7 @@ broadcaster.
 - SQLite coordinator with transactional leases and automatic expired-work recovery;
 - authenticated HTTP worker protocol for many remote GPU machines;
 - exact coverage accounting and a random-with-replacement comparison;
+- read-only Vast.ai/RunPod catalogs and a hard-budget cloud capacity planner;
 - private-key verification against an official puzzle address;
 - probability and runtime estimates with no fake "AI pattern" claims;
 - unit tests and GitHub Actions CI.
@@ -146,6 +147,29 @@ puzzleforge coordinator-init campaign.sqlite3 71 \
 This is research infrastructure, not a claimed shortcut. A different ordering
 can help only if a tested non-uniform prior exists. See
 [docs/MOSAIC.md](docs/MOSAIC.md).
+
+## Elastic cloud planning
+
+Fetch current offers without renting anything, then build a dry-run plan from
+measured rates and explicit budgets:
+
+```bash
+export VAST_API_KEY="..."
+puzzleforge cloud-catalog vast \
+  --gpu "RTX 4090" \
+  --output vast-offers.json
+
+puzzleforge cloud-plan vast-offers.json \
+  --rate "RTX 4090=5000000000" \
+  --max-instances 4 \
+  --max-total-hourly 2.00 \
+  --max-daily 20.00 \
+  --max-offer-hourly 0.70 \
+  --max-cost-per-quadrillion 40.00
+```
+
+The output always contains `"dry_run": true`; version 0.5 cannot create a paid
+instance. See [docs/ELASTIC_SWARM.md](docs/ELASTIC_SWARM.md).
 
 ## Honest scale
 
