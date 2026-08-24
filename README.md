@@ -47,6 +47,23 @@ puzzleforge gpu-probe --binary ./cuBitCrack
 puzzleforge gpu-test --binary ./cuBitCrack --device 0
 ```
 
+Auto-tune the engine on the installed GPU. Every benchmark first has to pass
+the solved #8 validation, then compares identical #71 work across several
+profiles and writes a reproducible JSON report:
+
+```bash
+puzzleforge gpu-benchmark \
+  --binary ./cuBitCrack \
+  --device 0 \
+  --profile quick \
+  --repeats 2 \
+  --output benchmark-rtx4090.json
+```
+
+Copy the reported `recommended_flags` into `gpu-worker`. The benchmark does not
+credit campaign coverage because each profile intentionally repeats the same
+control range.
+
 Run one small reference chunk and save progress:
 
 ```bash

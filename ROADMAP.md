@@ -20,7 +20,7 @@
 ## M2 — GPU
 
 - [x] cuBitCrack/clBitCrack capability probe and strict execution adapter
-- [ ] Reproducible GPU benchmark and auto-tuning harness
+- [x] Reproducible GPU benchmark and auto-tuning harness
 - [ ] CUDA secp256k1 point-walk kernel
 - [ ] Batched HASH160 target comparison on device
 - [ ] Multi-GPU scheduling and thermal/power telemetry
@@ -34,6 +34,16 @@
 - [x] Exact unique-coverage vs random-with-replacement metrics
 - [ ] Live throughput, coverage, ETA, and failure dashboard
 - [ ] Export/import of independently audited coverage maps
+
+## M4 — experimental scheduling and elastic capacity
+
+- [ ] MOSAIC strategy lanes with one global de-duplication map
+- [ ] Holdout backtests on solved challenge vectors and uniform controls
+- [ ] Automatic rejection of strategies without measurable lift
+- [ ] Vast.ai and RunPod provider adapters
+- [ ] Price/performance qualification before a cloud worker joins
+- [ ] Hard hourly/daily budget caps and automatic instance termination
+- [ ] Spot/preemption recovery through the existing lease protocol
 
 ## Merge rules
 

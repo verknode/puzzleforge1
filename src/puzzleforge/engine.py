@@ -217,7 +217,8 @@ class BitCrackEngine:
                     rate_keys_per_second=reported_rate or 0.0,
                     returncode=completed.returncode,
                     message=(
-                        f"BitCrack exited with code {completed.returncode}; range was not credited. "
+                        f"BitCrack exited with code {completed.returncode}; "
+                        "range was not credited. "
                         f"{_tail(output)}"
                     ),
                 )

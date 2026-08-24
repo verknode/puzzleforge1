@@ -212,6 +212,50 @@ def command_gpu_test(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_gpu_benchmark(args: argparse.Namespace) -> int:
+    from .benchmark import (
+        run_benchmark,
+        save_report,
+        tuning_profiles,
+        validate_known_puzzle,
+    )
+    from .engine import BitCrackEngine, EngineTuning
+
+    validation_engine = BitCrackEngine(
+        args.binary,
+        EngineTuning(device=args.device),
+        timeout_seconds=args.engine_timeout,
+    )
+    device_probe = validation_engine.probe()
+    validate_known_puzzle(validation_engine)
+    report = run_benchmark(
+        puzzle_number=args.puzzle,
+        chunk_size=args.chunk_size,
+        seed=args.seed,
+        sequence=args.sequence,
+        repeats=args.repeats,
+        profiles=tuning_profiles(args.profile, args.device),
+        engine_factory=lambda tuning: BitCrackEngine(
+            args.binary,
+            tuning,
+            timeout_seconds=args.engine_timeout,
+        ),
+        binary_name=args.binary.name,
+        device_probe=device_probe,
+    )
+    if args.output:
+        save_report(args.output, report)
+        print(f"Report: {args.output}")
+    else:
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+    if report.best is None:
+        print("No tuning profile completed successfully.", file=sys.stderr)
+        return 1
+    print(f"Best rate: {report.best.median_keys_per_second:,.0f} keys/s")
+    print(f"Use flags: {report.to_dict()['recommended_flags']}")
+    return 0
+
+
 def command_coordinator_init(args: argparse.Namespace) -> int:
     from .coordinator import Coordinator
 
@@ -361,6 +405,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_engine_arguments(gpu_test_parser)
     gpu_test_parser.set_defaults(handler=command_gpu_test)
+
+    gpu_benchmark_parser = subparsers.add_parser(
+        "gpu-benchmark", help="validate and auto-tune BitCrack settings"
+    )
+    gpu_benchmark_parser.add_argument("--binary", type=Path, required=True)
+    gpu_benchmark_parser.add_argument("--device", type=nonnegative_integer)
+    gpu_benchmark_parser.add_argument("--engine-timeout", type=float)
+    gpu_benchmark_parser.add_argument(
+        "--puzzle",
+        type=int,
+        choices=[p.number for p in puzzles() if p.status == "unsolved"],
+        default=71,
+    )
+    gpu_benchmark_parser.add_argument(
+        "--chunk-size", type=positive_integer, default=1 << 30
+    )
+    gpu_benchmark_parser.add_argument("--seed", default="puzzleforge-benchmark-v1")
+    gpu_benchmark_parser.add_argument(
+        "--sequence", type=nonnegative_integer, default=0
+    )
+    gpu_benchmark_parser.add_argument(
+        "--profile", choices=("quick", "balanced", "full"), default="quick"
+    )
+    gpu_benchmark_parser.add_argument("--repeats", type=positive_integer, default=2)
+    gpu_benchmark_parser.add_argument("--output", type=Path)
+    gpu_benchmark_parser.set_defaults(handler=command_gpu_benchmark)
 
     coordinator_init_parser = subparsers.add_parser(
         "coordinator-init", help="create a distributed campaign database"

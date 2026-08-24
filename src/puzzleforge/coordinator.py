@@ -184,7 +184,9 @@ class Coordinator:
                     lease_expires_at REAL,
                     attempts INTEGER NOT NULL DEFAULT 0,
                     result_checked INTEGER,
-                    result_kind TEXT CHECK (result_kind IS NULL OR result_kind IN ('nomatch', 'found')),
+                    result_kind TEXT CHECK (
+                        result_kind IS NULL OR result_kind IN ('nomatch', 'found')
+                    ),
                     found_key_hex TEXT,
                     elapsed_seconds REAL,
                     rate_keys_per_second REAL,
@@ -565,7 +567,11 @@ class Coordinator:
                 new_checked = int(campaign["checked_keys"]) + checked
                 completed_increment = 1 if result_kind == "nomatch" else 0
                 state = "found" if result_kind == "found" else campaign["state"]
-                found_value = normalized_key if result_kind == "found" else campaign["found_key_hex"]
+                found_value = (
+                    normalized_key
+                    if result_kind == "found"
+                    else campaign["found_key_hex"]
+                )
                 connection.execute(
                     """
                     UPDATE campaign

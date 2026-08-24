@@ -37,7 +37,8 @@ class CoordinatorClient:
             and not allow_insecure_http
         ):
             raise ValueError(
-                "remote coordinator requires HTTPS; use --allow-insecure-http only on a trusted tunnel"
+                "remote coordinator requires HTTPS; use --allow-insecure-http "
+                "only on a trusted tunnel"
             )
         if len(api_token) < 24:
             raise ValueError("API token must contain at least 24 characters")
