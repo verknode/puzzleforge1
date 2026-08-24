@@ -1,8 +1,8 @@
 # Elastic Swarm
 
 Elastic Swarm is the price/performance and lifecycle layer for rented GPU
-workers. Version 0.5 implements read-only catalogs and a budget-capped dry-run
-planner. It cannot purchase capacity.
+workers. The current release implements read-only catalogs and a budget-capped
+dry-run planner. It cannot purchase capacity.
 
 ## 1. Measure hardware
 

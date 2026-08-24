@@ -1,7 +1,12 @@
+import io
+import os
 import tempfile
 import unittest
+from argparse import Namespace
+from contextlib import redirect_stdout
 from pathlib import Path
 
+from puzzleforge.cli import command_local_app
 from puzzleforge.coordinator import Coordinator
 from puzzleforge.engine import EngineOutcome, EngineTuning
 from puzzleforge.local import (
@@ -119,6 +124,61 @@ class LocalTests(unittest.TestCase):
         self.assertEqual(completed.outcome, "complete")
         self.assertEqual(after_retry["completed_chunks"], 1)
         self.assertEqual(after_retry["allocated_chunks"], 1)
+
+    def test_local_app_runs_worker_and_dashboard_as_one_command(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "fake-cuBitCrack"
+            binary.write_text(
+                "#!/usr/bin/env python3\n"
+                "import pathlib, sys\n"
+                "out = pathlib.Path(sys.argv[sys.argv.index('--out') + 1])\n"
+                "out.write_text('Private key: 0xe0\\n', encoding='utf-8')\n"
+                "print('8.00 MKey/s')\n",
+                encoding="utf-8",
+            )
+            os.chmod(binary, 0o755)
+            database = root / "campaign.sqlite3"
+            Coordinator.initialize(
+                database,
+                puzzle_number=8,
+                chunk_size=128,
+                seed="local-app-test",
+            )
+            profile = LocalProfile(
+                schema=1,
+                puzzle=8,
+                binary=str(binary),
+                tuning=EngineTuning(device=0),
+                measured_rate_keys_per_second=8_000_000,
+                benchmark_relative_spread=0.0,
+                chunk_size=128,
+                target_chunk_seconds=300,
+                planner_mode="affine",
+                seed="local-app-test",
+                database=str(database),
+                benchmark_report=str(root / "benchmark.json"),
+                device_probe="Fake GPU",
+                created_at="2026-08-24T00:00:00+00:00",
+            )
+            profile_path = root / "profile.json"
+            save_profile(profile_path, profile)
+            args = Namespace(
+                profile=profile_path,
+                worker="local-app-test",
+                lease_seconds=60,
+                max_chunks=1,
+                engine_timeout=5.0,
+                no_thermal_guard=True,
+                host="127.0.0.1",
+                port=0,
+                no_open=True,
+            )
+            with redirect_stdout(io.StringIO()):
+                result = command_local_app(args)
+            state = Coordinator(database).status()["state"]
+        self.assertEqual(result, 0)
+        self.assertEqual(state, "found")
 
 
 if __name__ == "__main__":

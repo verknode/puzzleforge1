@@ -19,6 +19,8 @@ broadcaster.
   and one-command resume;
 - lightweight mobile-friendly dashboard with cached NVIDIA load, temperature,
   power, memory, speed, and exact coverage telemetry;
+- temperature guard with process abort, cooldown hysteresis, and same-chunk retry;
+- combined local app command and Windows double-click launcher;
 - SQLite coordinator with transactional leases and automatic expired-work recovery;
 - authenticated HTTP worker protocol for many remote GPU machines;
 - exact coverage accounting and a random-with-replacement comparison;
@@ -61,6 +63,16 @@ repeated, while an interrupted or failed chunk is returned to the retry queue.
 The measured flags are loaded automatically; they do not have to be copied
 into each command.
 
+After setup, start computation and the dashboard together with one command:
+
+```bash
+puzzleforge local-app
+```
+
+On Windows, `Start-PuzzleForge.cmd` creates/updates the local environment,
+performs first setup when `cuBitCrack.exe` is present, starts the campaign, and
+opens the dashboard. Subsequent launches resume the same durable campaign.
+
 ```bash
 puzzleforge local-status
 ```
@@ -77,6 +89,23 @@ interface and open port 8788 using the computer's local IP:
 ```bash
 puzzleforge local-dashboard --host 0.0.0.0
 ```
+
+## Thermal protection
+
+New local profiles use an 82 C hard limit and resume at 72 C. The guard checks
+NVIDIA telemetry every three seconds. If the limit is reached, PuzzleForge
+terminates the current engine process, credits zero work for that attempt,
+waits for cooldown, and retries the exact same chunk. A completed result is
+never replaced by a partial result.
+
+Configure thresholds during first setup:
+
+```bash
+puzzleforge local-setup --binary ./cuBitCrack --max-temp 80 --resume-temp 70
+```
+
+`--no-thermal-guard` is available for a non-NVIDIA engine without
+`nvidia-smi`, but removes this protection.
 
 Use `--benchmark-profile full` for a longer tune or `--chunk-seconds 600` to
 reduce checkpoint frequency. See [docs/LOCAL_FIRST.md](docs/LOCAL_FIRST.md).
@@ -209,8 +238,8 @@ puzzleforge cloud-plan vast-offers.json \
   --max-cost-per-quadrillion 40.00
 ```
 
-The output always contains `"dry_run": true`; version 0.5 cannot create a paid
-instance. See [docs/ELASTIC_SWARM.md](docs/ELASTIC_SWARM.md).
+The output always contains `"dry_run": true`; the current release cannot create
+a paid instance. See [docs/ELASTIC_SWARM.md](docs/ELASTIC_SWARM.md).
 
 ## Honest scale
 

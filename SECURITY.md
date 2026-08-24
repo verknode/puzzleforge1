@@ -36,6 +36,6 @@ this repository using an independently reviewed operational-security plan.
 
 - Provider tokens are read from `VAST_API_KEY` or `RUNPOD_API_KEY`; never place
   them in command arguments, reports, coordinator leases, or worker images.
-- `cloud-catalog` is read-only and `cloud-plan` is always a dry-run in v0.5.
+- `cloud-catalog` is read-only and `cloud-plan` is always a dry-run.
 - Paid provisioning must not be implemented without immutable plan expiry,
   explicit charge limits, double confirmation, and automatic termination tests.

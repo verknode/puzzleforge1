@@ -40,6 +40,12 @@ def dashboard_payload(
             "target_chunk_seconds": profile.target_chunk_seconds,
             "planner_mode": profile.planner_mode,
             "device_probe": profile.device_probe,
+            "thermal_guard": {
+                "maximum_c": profile.max_temperature_c,
+                "resume_c": profile.resume_temperature_c,
+                "poll_seconds": profile.thermal_poll_seconds,
+                "max_retries": profile.thermal_max_retries,
+            },
         },
         "campaign": campaign,
         "telemetry": telemetry,
@@ -50,12 +56,12 @@ def dashboard_payload(
     }
 
 
-def serve_dashboard(
+def create_dashboard_server(
     profile_path: Path,
     *,
     host: str = "127.0.0.1",
     port: int = 8788,
-) -> None:
+) -> ThreadingHTTPServer:
     profile = load_profile(profile_path)
     monitor = TelemetryCache(profile.tuning.device)
 
@@ -99,6 +105,16 @@ def serve_dashboard(
 
     server = ThreadingHTTPServer((host, port), DashboardHandler)
     server.daemon_threads = True
+    return server
+
+
+def serve_dashboard(
+    profile_path: Path,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8788,
+) -> None:
+    server = create_dashboard_server(profile_path, host=host, port=port)
     try:
         server.serve_forever(poll_interval=0.5)
     finally:
@@ -129,12 +145,12 @@ main{width:min(1120px,100%);margin:auto;padding:28px 18px 48px}header{display:fl
 <article class="card"><div class="label">Power</div><div class="value"><span id="power">—</span><span class="unit">W</span></div><div class="meta" id="powerLimit">limit —</div></article>
 <article class="card wide"><div class="label">Exact unique coverage</div><div class="value" id="coverage">—</div><div class="bar"><div class="fill" id="coverageBar"></div></div><div class="meta" id="checked">— checked</div></article>
 <article class="card wide"><div class="label">Campaign</div><div class="row"><span>Puzzle</span><b id="puzzle">—</b></div><div class="row"><span>Mode</span><b id="mode">—</b></div><div class="row"><span>Completed chunks</span><b id="chunks">—</b></div><div class="row"><span>Failures / retries</span><b id="failures">—</b></div></article>
-<article class="card full"><div class="label">Local profile</div><div class="row"><span>24h coverage at benchmark speed</span><b id="day">—</b></div><div class="row"><span>Durable chunk target</span><b id="chunkTarget">—</b></div><div class="row"><span>GPU memory</span><b id="memory">—</b></div><div class="row"><span>Last update</span><b id="updated">—</b></div><div class="meta error" id="error"></div></article>
+<article class="card full"><div class="label">Local profile</div><div class="row"><span>24h coverage at benchmark speed</span><b id="day">—</b></div><div class="row"><span>Durable chunk target</span><b id="chunkTarget">—</b></div><div class="row"><span>Configured thermal policy</span><b id="thermalGuard">—</b></div><div class="row"><span>GPU memory</span><b id="memory">—</b></div><div class="row"><span>Last update</span><b id="updated">—</b></div><div class="meta error" id="error"></div></article>
 </section></main>
 <script>
 const $=id=>document.getElementById(id),num=v=>Number(v||0),fmt=n=>new Intl.NumberFormat('en',{maximumFractionDigits:2,notation:'compact'}).format(n),pct=v=>{const n=num(v);return n===0?'0%':n<.000001?n.toExponential(3)+'%':n.toFixed(Math.min(8,Math.max(3,-Math.floor(Math.log10(n))+2)))+'%'};
 async function refresh(){try{const r=await fetch('/api/status',{cache:'no-store'});const d=await r.json();if(!r.ok)throw Error(d.error||r.status);const c=d.campaign,l=d.local,t=d.telemetry||{},x=d.derived;
-$('state').textContent=c.state;$('dot').style.background=c.state==='running'?'var(--good)':c.state==='found'?'var(--hot)':'var(--muted)';$('speed').textContent=fmt(l.measured_rate_keys_per_second);$('coverage').textContent=pct(x.coverage_percent);$('coverageBar').style.width=Math.min(100,num(x.coverage_percent))+'%';$('checked').textContent=fmt(num(c.checked_keys))+' / '+fmt(num(c.total_keys))+' checked';$('puzzle').textContent='#'+c.puzzle;$('mode').textContent=c.planner_mode.toUpperCase();$('chunks').textContent=c.completed_chunks;$('failures').textContent=c.worker_failures+' / '+c.retry_queue;$('day').textContent=pct(x.benchmark_day_percent);$('chunkTarget').textContent=l.target_chunk_seconds+' sec / '+fmt(l.chunk_size);$('updated').textContent=new Date(c.updated_at).toLocaleString();
+$('state').textContent=c.state;$('dot').style.background=c.state==='running'?'var(--good)':c.state==='found'?'var(--hot)':'var(--muted)';$('speed').textContent=fmt(l.measured_rate_keys_per_second);$('coverage').textContent=pct(x.coverage_percent);$('coverageBar').style.width=Math.min(100,num(x.coverage_percent))+'%';$('checked').textContent=fmt(num(c.checked_keys))+' / '+fmt(num(c.total_keys))+' checked';$('puzzle').textContent='#'+c.puzzle;$('mode').textContent=c.planner_mode.toUpperCase();$('chunks').textContent=c.completed_chunks;$('failures').textContent=c.worker_failures+' / '+c.retry_queue;$('day').textContent=pct(x.benchmark_day_percent);$('chunkTarget').textContent=l.target_chunk_seconds+' sec / '+fmt(l.chunk_size);$('thermalGuard').textContent=l.thermal_guard.maximum_c+'°C → '+l.thermal_guard.resume_c+'°C';$('updated').textContent=new Date(c.updated_at).toLocaleString();
 if(t.available){$('gpuName').textContent='LOCAL GPU / '+t.name;$('load').textContent=Math.round(num(t.utilization_percent));$('loadBar').style.width=Math.min(100,num(t.utilization_percent))+'%';$('temp').textContent=Math.round(num(t.temperature_c));$('power').textContent=num(t.power_w).toFixed(0);$('powerLimit').textContent='limit '+num(t.power_limit_w).toFixed(0)+' W';$('clock').textContent=fmt(num(t.sm_clock_mhz))+' MHz';$('memory').textContent=fmt(num(t.memory_used_mib))+' / '+fmt(num(t.memory_total_mib))+' MiB';$('error').textContent=''}else{$('error').textContent=t.error||'GPU telemetry unavailable'}
 }catch(e){$('state').textContent='OFFLINE';$('dot').style.background='var(--bad)';$('error').textContent=e.message}}
 refresh();setInterval(refresh,3000);

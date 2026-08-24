@@ -40,6 +40,10 @@ class LocalProfile:
     benchmark_report: str
     device_probe: str
     created_at: str
+    max_temperature_c: float = 82.0
+    resume_temperature_c: float = 72.0
+    thermal_poll_seconds: float = 3.0
+    thermal_max_retries: int = 3
 
     def __post_init__(self) -> None:
         if self.schema != PROFILE_SCHEMA:
@@ -65,6 +69,14 @@ class LocalProfile:
             raise ValueError("local profile seed is empty")
         if not self.database or not self.benchmark_report:
             raise ValueError("local profile state paths are empty")
+        if not 40 <= self.max_temperature_c <= 100:
+            raise ValueError("local profile maximum temperature is invalid")
+        if not 20 <= self.resume_temperature_c < self.max_temperature_c:
+            raise ValueError("local profile resume temperature is invalid")
+        if not 0.01 <= self.thermal_poll_seconds <= 60:
+            raise ValueError("local profile thermal poll interval is invalid")
+        if not 0 <= self.thermal_max_retries <= 100:
+            raise ValueError("local profile thermal retry count is invalid")
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -101,6 +113,10 @@ class LocalProfile:
                 benchmark_report=str(payload["benchmark_report"]),
                 device_probe=str(payload.get("device_probe", "")),
                 created_at=str(payload["created_at"]),
+                max_temperature_c=float(payload.get("max_temperature_c", 82.0)),
+                resume_temperature_c=float(payload.get("resume_temperature_c", 72.0)),
+                thermal_poll_seconds=float(payload.get("thermal_poll_seconds", 3.0)),
+                thermal_max_retries=int(payload.get("thermal_max_retries", 3)),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"invalid local profile: {exc}") from exc
@@ -212,12 +228,33 @@ def load_profile(path: Path) -> LocalProfile:
 
 
 def engine_from_profile(
-    profile: LocalProfile, *, timeout_seconds: float | None = None
-) -> BitCrackEngine:
-    return BitCrackEngine(
+    profile: LocalProfile,
+    *,
+    timeout_seconds: float | None = None,
+    thermal_guard: bool = True,
+) -> LocalEngine:
+    abort_event = threading.Event() if thermal_guard else None
+    engine = BitCrackEngine(
         Path(profile.binary),
         profile.tuning,
         timeout_seconds=timeout_seconds,
+        abort_event=abort_event,
+    )
+    if not thermal_guard:
+        return engine
+
+    from .thermal import ThermalGuardedEngine, ThermalPolicy
+
+    return ThermalGuardedEngine(
+        engine,
+        abort_event,
+        device=profile.tuning.device,
+        policy=ThermalPolicy(
+            maximum_c=profile.max_temperature_c,
+            resume_c=profile.resume_temperature_c,
+            poll_seconds=profile.thermal_poll_seconds,
+            max_retries=profile.thermal_max_retries,
+        ),
     )
 
 

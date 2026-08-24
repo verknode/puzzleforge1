@@ -1,5 +1,6 @@
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -63,6 +64,27 @@ class EngineTests(unittest.TestCase):
             outcome = BitCrackEngine(binary).scan(puzzle, chunk)
         self.assertEqual(outcome.status, "error")
         self.assertEqual(outcome.checked, 0)
+
+    def test_safety_abort_terminates_process_without_credit(self) -> None:
+        puzzle = get_puzzle(8)
+        chunk = KeyChunk(ordinal=0, chunk_id=0, start=puzzle.start, end=puzzle.end)
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "slow-cuBitCrack"
+            binary.write_text(
+                "#!/usr/bin/env python3\n"
+                "import time\n"
+                "time.sleep(30)\n",
+                encoding="utf-8",
+            )
+            os.chmod(binary, 0o755)
+            abort = threading.Event()
+            abort.set()
+            outcome = BitCrackEngine(
+                binary, abort_event=abort, poll_seconds=0.01
+            ).scan(puzzle, chunk)
+        self.assertEqual(outcome.status, "error")
+        self.assertEqual(outcome.checked, 0)
+        self.assertIn("safety guard", outcome.message)
 
 
 if __name__ == "__main__":

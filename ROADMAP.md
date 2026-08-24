@@ -26,9 +26,11 @@
 - [ ] Batched HASH160 target comparison on device
 - [ ] Multi-GPU scheduling and thermal/power telemetry
 - [ ] Checkpoint-safe kernel boundaries
-- [ ] Automatic temperature, power, and throttling guard for long local sessions
+- [x] Automatic temperature guard with abort, cooldown, and same-chunk retry
+- [ ] Adaptive power/throttling optimization from long-session telemetry
 - [x] Lightweight mobile-friendly local web dashboard
-- [ ] Desktop launcher and start/stop controls
+- [x] Combined local app command and Windows double-click launcher
+- [ ] Signed standalone desktop executable and dashboard start/stop controls
 
 ## M3 — distributed search
 

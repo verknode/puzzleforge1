@@ -41,6 +41,11 @@ Ctrl+C safely stops the current run. A fully completed chunk stays credited;
 an unfinished chunk returns to the retry queue. Running the same command later
 continues from the SQLite state.
 
+The default local run is protected by a hysteresis guard: it aborts an
+uncredited in-progress engine process at 82 C, waits until 72 C, then retries
+the same durable chunk. Repeated telemetry loss also stops the attempt rather
+than silently claiming coverage.
+
 To run a bounded session:
 
 ```bash
@@ -76,6 +81,17 @@ Open `http://COMPUTER_LOCAL_IP:8788` on the phone. The dashboard has no mutation
 endpoints, but binding beyond localhost exposes campaign statistics to that
 network, so it should not be forwarded directly to the public internet.
 
+To launch the worker and dashboard together:
+
+```bash
+puzzleforge local-app
+```
+
+On Windows, double-click `Start-PuzzleForge.cmd`. The launcher creates a local
+virtual environment, installs the checked-out PuzzleForge version, detects a
+`cuBitCrack.exe`/`clBitCrack.exe` placed in the repository or
+`.puzzleforge/bin`, performs setup once, and resumes on later launches.
+
 ## Tuning controls
 
 The default quick benchmark is intended for first use:
@@ -95,7 +111,7 @@ benchmarking because the control range is intentionally repeated.
 
 ## Multiple owned GPUs
 
-Version 0.7 focuses on a reliable single-device path. Multiple cards can still
-use the existing coordinator/worker commands. Native local multi-GPU launch,
-per-device thermal limits, and a lightweight dashboard are the next local-first
-milestones.
+Version 0.8 focuses on a reliable protected single-device path. Multiple cards
+can still use the existing coordinator/worker commands. Native local multi-GPU
+launch, per-device supervision, and adaptive power tuning are the next
+local-first milestones.

@@ -311,6 +311,14 @@ def command_local_setup(args: argparse.Namespace) -> int:
         save_profile,
         utc_now,
     )
+    from .thermal import ThermalPolicy
+
+    ThermalPolicy(
+        maximum_c=args.max_temp,
+        resume_c=args.resume_temp,
+        poll_seconds=args.thermal_poll_seconds,
+        max_retries=args.thermal_retries,
+    )
 
     state_dir = args.state_dir.expanduser().resolve()
     profile_path = state_dir / "profile.json"
@@ -380,6 +388,10 @@ def command_local_setup(args: argparse.Namespace) -> int:
         benchmark_report=str(benchmark_path),
         device_probe=device_probe,
         created_at=utc_now(),
+        max_temperature_c=args.max_temp,
+        resume_temperature_c=args.resume_temp,
+        thermal_poll_seconds=args.thermal_poll_seconds,
+        thermal_max_retries=args.thermal_retries,
     )
     save_profile(profile_path, profile)
 
@@ -391,10 +403,18 @@ def command_local_setup(args: argparse.Namespace) -> int:
 
 
 def command_local_run(args: argparse.Namespace) -> int:
+    return _run_local_campaign(args)
+
+
+def _run_local_campaign(args: argparse.Namespace) -> int:
     from .local import engine_from_profile, load_profile, run_local_once
 
     profile = load_profile(args.profile)
-    engine = engine_from_profile(profile, timeout_seconds=args.engine_timeout)
+    engine = engine_from_profile(
+        profile,
+        timeout_seconds=args.engine_timeout,
+        thermal_guard=not args.no_thermal_guard,
+    )
     completed = 0
     try:
         while args.max_chunks is None or completed < args.max_chunks:
@@ -432,6 +452,12 @@ def command_local_status(args: argparse.Namespace) -> int:
             "chunk_size": profile.chunk_size,
             "target_chunk_seconds": profile.target_chunk_seconds,
             "benchmark_relative_spread": profile.benchmark_relative_spread,
+            "thermal_guard": {
+                "maximum_c": profile.max_temperature_c,
+                "resume_c": profile.resume_temperature_c,
+                "poll_seconds": profile.thermal_poll_seconds,
+                "max_retries": profile.thermal_max_retries,
+            },
         },
         "campaign": Coordinator(Path(profile.database)).status(),
     }
@@ -451,6 +477,36 @@ def command_local_dashboard(args: argparse.Namespace) -> int:
         print("Dashboard stopped.")
         return 130
     return 0
+
+
+def command_local_app(args: argparse.Namespace) -> int:
+    import threading
+    import webbrowser
+
+    from .dashboard import create_dashboard_server
+
+    server = create_dashboard_server(args.profile, host=args.host, port=args.port)
+    dashboard = threading.Thread(
+        target=server.serve_forever,
+        kwargs={"poll_interval": 0.5},
+        name="puzzleforge-dashboard",
+        daemon=True,
+    )
+    dashboard.start()
+    browser_host = "127.0.0.1" if args.host in {"0.0.0.0", "::"} else args.host
+    url = f"http://{browser_host}:{args.port}"
+    print(f"PuzzleForge Local: {url}")
+    if not args.no_open:
+        try:
+            webbrowser.open(url)
+        except webbrowser.Error as exc:
+            print(f"Browser did not open automatically: {exc}")
+    try:
+        return _run_local_campaign(args)
+    finally:
+        server.shutdown()
+        dashboard.join(timeout=5)
+        server.server_close()
 
 
 def command_coordinator_init(args: argparse.Namespace) -> int:
@@ -638,6 +694,21 @@ def add_engine_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--engine-timeout", type=float)
 
 
+def add_local_runtime_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--profile", type=Path, default=Path(".puzzleforge/local/profile.json")
+    )
+    parser.add_argument("--worker", default="local-gpu-0")
+    parser.add_argument("--lease-seconds", type=positive_integer, default=3_600)
+    parser.add_argument("--max-chunks", type=positive_integer)
+    parser.add_argument("--engine-timeout", type=float)
+    parser.add_argument(
+        "--no-thermal-guard",
+        action="store_true",
+        help="disable NVIDIA temperature protection",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="puzzleforge",
@@ -767,20 +838,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode", choices=("affine", "mosaic"), default="affine"
     )
     local_setup_parser.add_argument("--seed", default="puzzleforge-local-v1")
+    local_setup_parser.add_argument("--max-temp", type=float, default=82.0)
+    local_setup_parser.add_argument("--resume-temp", type=float, default=72.0)
+    local_setup_parser.add_argument(
+        "--thermal-poll-seconds", type=float, default=3.0
+    )
+    local_setup_parser.add_argument(
+        "--thermal-retries", type=nonnegative_integer, default=3
+    )
     local_setup_parser.set_defaults(handler=command_local_setup)
 
     local_run_parser = subparsers.add_parser(
         "local-run", help="run or resume the auto-tuned local GPU campaign"
     )
-    local_run_parser.add_argument(
-        "--profile", type=Path, default=Path(".puzzleforge/local/profile.json")
-    )
-    local_run_parser.add_argument("--worker", default="local-gpu-0")
-    local_run_parser.add_argument(
-        "--lease-seconds", type=positive_integer, default=3_600
-    )
-    local_run_parser.add_argument("--max-chunks", type=positive_integer)
-    local_run_parser.add_argument("--engine-timeout", type=float)
+    add_local_runtime_arguments(local_run_parser)
     local_run_parser.set_defaults(handler=command_local_run)
 
     local_status_parser = subparsers.add_parser(
@@ -800,6 +871,15 @@ def build_parser() -> argparse.ArgumentParser:
     local_dashboard_parser.add_argument("--host", default="127.0.0.1")
     local_dashboard_parser.add_argument("--port", type=positive_integer, default=8788)
     local_dashboard_parser.set_defaults(handler=command_local_dashboard)
+
+    local_app_parser = subparsers.add_parser(
+        "local-app", help="run the local GPU campaign and dashboard together"
+    )
+    add_local_runtime_arguments(local_app_parser)
+    local_app_parser.add_argument("--host", default="127.0.0.1")
+    local_app_parser.add_argument("--port", type=positive_integer, default=8788)
+    local_app_parser.add_argument("--no-open", action="store_true")
+    local_app_parser.set_defaults(handler=command_local_app)
 
     coordinator_init_parser = subparsers.add_parser(
         "coordinator-init", help="create a distributed campaign database"
