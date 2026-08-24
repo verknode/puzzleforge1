@@ -41,4 +41,7 @@ if (-not (Test-Path $Profile)) {
     if ($LASTEXITCODE -ne 0) { throw "PuzzleForge local setup failed." }
 }
 
+& $PuzzleForge hypothesis-enable
+if ($LASTEXITCODE -ne 0) { throw "Could not enable Hypothesis Lab." }
+
 & $PuzzleForge local-app

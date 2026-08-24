@@ -44,6 +44,9 @@ class LocalProfile:
     resume_temperature_c: float = 72.0
     thermal_poll_seconds: float = 3.0
     thermal_max_retries: int = 3
+    hypothesis_enabled: bool = False
+    hypothesis_research_percent: int = 10
+    hypothesis_search_percent: int = 90
 
     def __post_init__(self) -> None:
         if self.schema != PROFILE_SCHEMA:
@@ -63,7 +66,7 @@ class LocalProfile:
             raise ValueError("local profile chunk size is invalid")
         if not 10 <= self.target_chunk_seconds <= 86_400:
             raise ValueError("local profile target chunk duration is invalid")
-        if self.planner_mode not in {"affine", "mosaic"}:
+        if self.planner_mode not in {"affine", "mosaic", "hypothesis"}:
             raise ValueError("local profile planner mode is invalid")
         if not self.seed:
             raise ValueError("local profile seed is empty")
@@ -77,6 +80,24 @@ class LocalProfile:
             raise ValueError("local profile thermal poll interval is invalid")
         if not 0 <= self.thermal_max_retries <= 100:
             raise ValueError("local profile thermal retry count is invalid")
+        if not isinstance(self.hypothesis_enabled, bool):
+            raise ValueError("local profile Hypothesis Lab flag is invalid")
+        if (
+            isinstance(self.hypothesis_research_percent, bool)
+            or isinstance(self.hypothesis_search_percent, bool)
+            or not 1 <= self.hypothesis_research_percent <= 50
+            or not 1 <= self.hypothesis_search_percent <= 99
+            or self.hypothesis_research_percent
+            + self.hypothesis_search_percent
+            != 100
+        ):
+            raise ValueError("local profile Hypothesis Lab ratio is invalid")
+        if self.planner_mode == "hypothesis" and not self.hypothesis_enabled:
+            raise ValueError("hypothesis planner requires Hypothesis Lab")
+        if self.hypothesis_enabled and self.puzzle < 18:
+            raise ValueError(
+                "Hypothesis Lab requires a target after the training observations"
+            )
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -89,6 +110,7 @@ class LocalProfile:
         if not isinstance(tuning, dict):
             raise ValueError("local profile tuning is missing")
         try:
+            planner_mode = str(payload["planner_mode"])
             return cls(
                 schema=int(payload["schema"]),
                 puzzle=int(payload["puzzle"]),
@@ -107,7 +129,7 @@ class LocalProfile:
                 ),
                 chunk_size=int(payload["chunk_size"]),
                 target_chunk_seconds=int(payload["target_chunk_seconds"]),
-                planner_mode=str(payload["planner_mode"]),
+                planner_mode=planner_mode,
                 seed=str(payload["seed"]),
                 database=str(payload["database"]),
                 benchmark_report=str(payload["benchmark_report"]),
@@ -117,6 +139,17 @@ class LocalProfile:
                 resume_temperature_c=float(payload.get("resume_temperature_c", 72.0)),
                 thermal_poll_seconds=float(payload.get("thermal_poll_seconds", 3.0)),
                 thermal_max_retries=int(payload.get("thermal_max_retries", 3)),
+                hypothesis_enabled=_optional_bool(
+                    payload.get(
+                        "hypothesis_enabled", planner_mode == "hypothesis"
+                    )
+                ),
+                hypothesis_research_percent=int(
+                    payload.get("hypothesis_research_percent", 10)
+                ),
+                hypothesis_search_percent=int(
+                    payload.get("hypothesis_search_percent", 90)
+                ),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"invalid local profile: {exc}") from exc
@@ -353,3 +386,9 @@ def _optional_int(value: object) -> int | None:
     if isinstance(value, bool):
         raise ValueError("boolean is not a valid tuning integer")
     return int(value)
+
+
+def _optional_bool(value: object) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError("value must be a boolean")
+    return value

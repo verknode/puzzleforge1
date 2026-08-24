@@ -45,8 +45,10 @@
 
 - [x] MOSAIC deterministic strategy lanes and global de-duplication planner
 - [x] Persist MOSAIC lane cursors in the lease coordinator
-- [ ] Holdout backtests on solved challenge vectors and uniform controls
-- [ ] Automatic rejection of strategies without measurable lift
+- [x] Verified solved-vector dataset and forward-only holdout backtests
+- [x] Persistent Hypothesis Lab 10/90 analysis/search cycles
+- [x] Multiple-testing-adjusted validation labels for measured lift
+- [x] Automatic uniform fallback for strategies without measurable lift
 - [x] Read-only Vast.ai and RunPod catalog adapters
 - [x] Measured price/performance qualification and dry-run selection
 - [x] Hard hourly/daily budget policy before any provisioning

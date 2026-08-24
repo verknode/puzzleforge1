@@ -21,12 +21,15 @@ broadcaster.
   power, memory, speed, and exact coverage telemetry;
 - temperature guard with process abort, cooldown hysteresis, and same-chunk retry;
 - combined local app command and Windows double-click launcher;
+- Hypothesis Lab with verified solved vectors, forward-only holdout scoring,
+  persistent 10/90 research-to-search cycles, and global range de-duplication;
 - SQLite coordinator with transactional leases and automatic expired-work recovery;
 - authenticated HTTP worker protocol for many remote GPU machines;
 - exact coverage accounting and a random-with-replacement comparison;
 - read-only Vast.ai/RunPod catalogs and a hard-budget cloud capacity planner;
 - private-key verification against an official puzzle address;
-- probability and runtime estimates with no fake "AI pattern" claims;
+- probability and runtime estimates that separate experimental ordering from
+  proven unique coverage;
 - unit tests and GitHub Actions CI.
 
 The Python scanner is a correctness oracle, not the fast path. GPU work is sent
@@ -71,7 +74,8 @@ puzzleforge local-app
 
 On Windows, `Start-PuzzleForge.cmd` creates/updates the local environment,
 performs first setup when `cuBitCrack.exe` is present, starts the campaign, and
-opens the dashboard. Subsequent launches resume the same durable campaign.
+opens the dashboard. It also enables Hypothesis Lab for both new and existing
+local profiles. Subsequent launches resume the same durable campaign.
 
 ```bash
 puzzleforge local-status
@@ -106,6 +110,30 @@ puzzleforge local-setup --binary ./cuBitCrack --max-temp 80 --resume-temp 70
 
 `--no-thermal-guard` is available for a non-NVIDIA engine without
 `nvidia-smi`, but removes this protection.
+
+## Hypothesis Lab 10/90 mode
+
+New local campaigns use `--mode hypothesis` by default. The lab validates the
+public solved vectors #1-#70, normalizes each solution inside its published
+interval, and compares seven fixed models with forward-only holdouts. One
+research phase selects a normalized cell, then feeds nine unique ranges to the
+GPU. After the ninth range, it analyzes again and repeats:
+
+```bash
+puzzleforge hypothesis-preview 71 --preview 18
+puzzleforge hypothesis-enable
+puzzleforge local-app
+```
+
+The 10/90 ratio means one analysis decision for nine GPU chunks. The analysis
+is short CPU work; PuzzleForge does not deliberately idle the GPU for 10% of
+wall-clock time. Every proposed chunk still passes through the SQLite global
+duplicate filter, so an experimental priority never creates fake coverage.
+
+The current dataset does not pass the adjusted validation gate for a proven
+non-uniform lift. The lab therefore selects `UNIFORM FALLBACK`; an experimental
+model cannot consume the nine GPU slots until it passes the gate. See
+[docs/HYPOTHESIS_LAB.md](docs/HYPOTHESIS_LAB.md).
 
 Use `--benchmark-profile full` for a longer tune or `--chunk-seconds 600` to
 reduce checkpoint frequency. See [docs/LOCAL_FIRST.md](docs/LOCAL_FIRST.md).

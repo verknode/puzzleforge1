@@ -19,7 +19,7 @@ from .partition import ChunkPlan, KeyChunk
 from .registry import get_puzzle
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SQLITE_MAX_INTEGER = (1 << 63) - 1
 _WORKER_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}\Z")
 
@@ -156,8 +156,15 @@ class Coordinator:
             raise ValueError("chunk_size must fit a positive SQLite integer")
         if not seed or len(seed.encode("utf-8")) > 512:
             raise ValueError("seed must contain 1-512 UTF-8 bytes")
-        if planner_mode not in {"affine", "mosaic"}:
-            raise ValueError("planner_mode must be affine or mosaic")
+        if planner_mode not in {"affine", "mosaic", "hypothesis"}:
+            raise ValueError("planner_mode must be affine, mosaic, or hypothesis")
+
+        hypothesis_enabled = planner_mode == "hypothesis"
+        stored_planner_mode = "affine" if hypothesis_enabled else planner_mode
+        if hypothesis_enabled and puzzle_number < 18:
+            raise ValueError(
+                "Hypothesis Lab requires a target after the training observations"
+            )
 
         puzzle = get_puzzle(puzzle_number)
         plan = ChunkPlan(puzzle=puzzle, chunk_size=chunk_size, seed=seed)
@@ -172,7 +179,7 @@ class Coordinator:
                 separators=(",", ":"),
                 sort_keys=True,
             )
-            if planner_mode == "mosaic"
+            if stored_planner_mode == "mosaic"
             else None
         )
 
@@ -235,6 +242,17 @@ class Coordinator:
 
                 CREATE INDEX work_state_id ON work(state, id);
                 CREATE INDEX work_expiry ON work(state, lease_expires_at);
+
+                CREATE TABLE hypothesis_lab (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+                    research_percent INTEGER NOT NULL,
+                    search_percent INTEGER NOT NULL,
+                    state_json TEXT,
+                    report_json TEXT,
+                    analyzed_at TEXT,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
             now = utc_now()
@@ -260,11 +278,20 @@ class Coordinator:
                     seed,
                     chunk_size,
                     plan.total_chunks,
-                    planner_mode,
+                    stored_planner_mode,
                     planner_state,
                     now,
                     now,
                 ),
+            )
+            connection.execute(
+                """
+                INSERT INTO hypothesis_lab (
+                    id, enabled, research_percent, search_percent,
+                    state_json, report_json, analyzed_at, updated_at
+                ) VALUES (1, ?, 10, 90, NULL, NULL, NULL, ?)
+                """,
+                (1 if hypothesis_enabled else 0, now),
             )
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         except BaseException:
@@ -316,6 +343,42 @@ class Coordinator:
                 )
                 connection.execute(
                     "UPDATE campaign SET schema_version = ? WHERE id = 1",
+                    (2,),
+                )
+                connection.execute("PRAGMA user_version = 2")
+                connection.commit()
+                version = 2
+            except BaseException:
+                connection.rollback()
+                raise
+        if version == 2:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    """
+                    CREATE TABLE hypothesis_lab (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+                        research_percent INTEGER NOT NULL,
+                        search_percent INTEGER NOT NULL,
+                        state_json TEXT,
+                        report_json TEXT,
+                        analyzed_at TEXT,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO hypothesis_lab (
+                        id, enabled, research_percent, search_percent,
+                        state_json, report_json, analyzed_at, updated_at
+                    ) VALUES (1, 0, 10, 90, NULL, NULL, NULL, ?)
+                    """,
+                    (utc_now(),),
+                )
+                connection.execute(
+                    "UPDATE campaign SET schema_version = ? WHERE id = 1",
                     (SCHEMA_VERSION,),
                 )
                 connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -355,6 +418,82 @@ class Coordinator:
         return row
 
     @staticmethod
+    def _load_hypothesis(connection: sqlite3.Connection) -> sqlite3.Row:
+        row = connection.execute(
+            "SELECT * FROM hypothesis_lab WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            raise CoordinatorError("Hypothesis Lab state is missing")
+        research = row["research_percent"]
+        search = row["search_percent"]
+        if (
+            isinstance(research, bool)
+            or isinstance(search, bool)
+            or not 1 <= research <= 50
+            or not 1 <= search <= 99
+            or research + search != 100
+        ):
+            raise CoordinatorError("Hypothesis Lab ratio is invalid")
+        for name in ("state_json", "report_json"):
+            if row[name] is not None:
+                try:
+                    payload = json.loads(row[name])
+                except (TypeError, json.JSONDecodeError) as exc:
+                    raise CoordinatorError(
+                        f"Hypothesis Lab {name} is invalid"
+                    ) from exc
+                if not isinstance(payload, dict):
+                    raise CoordinatorError(f"Hypothesis Lab {name} must be an object")
+        return row
+
+    def enable_hypothesis(
+        self,
+        *,
+        research_percent: int = 10,
+        search_percent: int = 90,
+    ) -> None:
+        if (
+            isinstance(research_percent, bool)
+            or isinstance(search_percent, bool)
+            or not 1 <= research_percent <= 50
+            or not 1 <= search_percent <= 99
+            or research_percent + search_percent != 100
+        ):
+            raise ValueError("Hypothesis Lab percentages must total 100")
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._load_hypothesis(connection)
+                same_ratio = (
+                    row["research_percent"] == research_percent
+                    and row["search_percent"] == search_percent
+                )
+                connection.execute(
+                    """
+                    UPDATE hypothesis_lab
+                       SET enabled = 1, research_percent = ?, search_percent = ?,
+                           state_json = CASE WHEN ? THEN state_json ELSE NULL END,
+                           report_json = CASE WHEN ? THEN report_json ELSE NULL END,
+                           analyzed_at = CASE WHEN ? THEN analyzed_at ELSE NULL END,
+                           updated_at = ?
+                     WHERE id = 1
+                    """,
+                    (
+                        research_percent,
+                        search_percent,
+                        1 if same_ratio else 0,
+                        1 if same_ratio else 0,
+                        1 if same_ratio else 0,
+                        now,
+                    ),
+                )
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+
+    @staticmethod
     def _plan(campaign: sqlite3.Row) -> ChunkPlan:
         return ChunkPlan(
             puzzle=get_puzzle(campaign["puzzle"]),
@@ -368,6 +507,59 @@ class Coordinator:
         campaign: sqlite3.Row,
         sequence: int,
     ) -> tuple[KeyChunk, str, int, str | None]:
+        hypothesis = Coordinator._load_hypothesis(connection)
+        if hypothesis["enabled"]:
+            from .hypothesis import HypothesisPlanner
+
+            planner = HypothesisPlanner(
+                campaign["total_chunks"],
+                target_puzzle=campaign["puzzle"],
+                seed=campaign["seed"],
+                research_percent=hypothesis["research_percent"],
+                search_percent=hypothesis["search_percent"],
+            )
+            if hypothesis["state_json"]:
+                try:
+                    planner.restore(json.loads(hypothesis["state_json"]))
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise CoordinatorError("Hypothesis Lab state is invalid") from exc
+            candidate = planner.next_unseen(_SQLiteSeen(connection))
+            now = utc_now()
+            connection.execute(
+                """
+                UPDATE hypothesis_lab
+                   SET state_json = ?, report_json = ?, analyzed_at = ?, updated_at = ?
+                 WHERE id = 1
+                """,
+                (
+                    json.dumps(
+                        planner.state(), separators=(",", ":"), sort_keys=True
+                    ),
+                    json.dumps(
+                        planner.last_report,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                    now if candidate.analysis_performed else hypothesis["analyzed_at"],
+                    now,
+                ),
+            )
+            puzzle = get_puzzle(campaign["puzzle"])
+            start = puzzle.start + candidate.chunk_id * campaign["chunk_size"]
+            end = min(start + campaign["chunk_size"] - 1, puzzle.end)
+            chunk = KeyChunk(
+                ordinal=sequence,
+                chunk_id=candidate.chunk_id,
+                start=start,
+                end=end,
+            )
+            return (
+                chunk,
+                candidate.lane,
+                candidate.strategy_rank,
+                campaign["planner_state"],
+            )
+
         if campaign["planner_mode"] == "affine":
             chunk = Coordinator._plan(campaign).chunk_for_sequence(sequence)
             return chunk, "affine", sequence, None
@@ -789,6 +981,7 @@ class Coordinator:
                      ORDER BY strategy_lane, state
                     """
                 ).fetchall()
+                hypothesis = self._load_hypothesis(connection)
                 connection.commit()
             except BaseException:
                 connection.rollback()
@@ -812,12 +1005,36 @@ class Coordinator:
                 {"available": 0, "leased": 0, "completed": 0},
             )
             lane[row["state"]] = row["count"]
+        hypothesis_state = (
+            json.loads(hypothesis["state_json"])
+            if hypothesis["state_json"]
+            else None
+        )
+        hypothesis_report = (
+            json.loads(hypothesis["report_json"])
+            if hypothesis["report_json"]
+            else None
+        )
+        hypothesis_status = {
+            "enabled": bool(hypothesis["enabled"]),
+            "research_percent": hypothesis["research_percent"],
+            "search_percent": hypothesis["search_percent"],
+            "cycle": 0 if hypothesis_state is None else hypothesis_state["cycle"],
+            "queued_search_slots": (
+                0 if hypothesis_state is None else len(hypothesis_state["queue"])
+            ),
+            "analyzed_at": hypothesis["analyzed_at"],
+            "report": hypothesis_report,
+        }
         return {
             "schema_version": campaign["schema_version"],
             "puzzle": puzzle.number,
             "address": puzzle.address,
             "state": campaign["state"],
-            "planner_mode": campaign["planner_mode"],
+            "planner_mode": (
+                "hypothesis" if hypothesis["enabled"] else campaign["planner_mode"]
+            ),
+            "base_planner_mode": campaign["planner_mode"],
             "seed": campaign["seed"],
             "chunk_size": campaign["chunk_size"],
             "total_chunks": campaign["total_chunks"],
@@ -835,6 +1052,7 @@ class Coordinator:
             "worker_failures": campaign["total_failures"],
             "average_reported_rate": metrics["average_rate"] or 0.0,
             "strategy_lanes": strategy_lanes,
+            "hypothesis_lab": hypothesis_status,
             "found_key_hex": campaign["found_key_hex"],
             "created_at": campaign["created_at"],
             "updated_at": campaign["updated_at"],

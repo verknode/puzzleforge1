@@ -6,7 +6,7 @@ from argparse import Namespace
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from puzzleforge.cli import command_local_app
+from puzzleforge.cli import command_hypothesis_enable, command_local_app
 from puzzleforge.coordinator import Coordinator
 from puzzleforge.engine import EngineOutcome, EngineTuning
 from puzzleforge.local import (
@@ -107,6 +107,30 @@ class LocalTests(unittest.TestCase):
         self.assertEqual(second.outcome, "complete")
         self.assertEqual(status["completed_chunks"], 2)
         self.assertEqual(status["checked_keys"], "512")
+
+    def test_existing_profile_can_enable_hypothesis_without_losing_work(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            profile = self.make_profile(directory)
+            profile_path = Path(directory) / "profile.json"
+            save_profile(profile_path, profile)
+            coordinator = Coordinator(Path(profile.database))
+            previous = coordinator.lease(
+                "before-lab", lease_seconds=60, now_epoch=1000
+            )
+            with redirect_stdout(io.StringIO()):
+                result = command_hypothesis_enable(Namespace(profile=profile_path))
+            updated = load_profile(profile_path)
+            next_lease = coordinator.lease(
+                "after-lab", lease_seconds=60, now_epoch=1001
+            )
+            status = coordinator.status(now_epoch=1002)
+
+        self.assertEqual(result, 0)
+        self.assertTrue(updated.hypothesis_enabled)
+        self.assertEqual(updated.planner_mode, "hypothesis")
+        self.assertNotEqual(previous.chunk_id, next_lease.chunk_id)
+        self.assertTrue(next_lease.strategy_lane.startswith("hypothesis:"))
+        self.assertTrue(status["hypothesis_lab"]["enabled"])
 
     def test_failed_local_chunk_returns_to_retry_queue(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

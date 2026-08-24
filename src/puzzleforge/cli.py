@@ -7,7 +7,7 @@ import secrets
 import socket
 import sys
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from .checkpoint import load_checkpoint
@@ -207,6 +207,52 @@ def command_mosaic_preview(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_hypothesis_preview(args: argparse.Namespace) -> int:
+    from .hypothesis import HypothesisPlanner
+
+    puzzle = get_puzzle(args.puzzle)
+    total_chunks = (puzzle.size + args.chunk_size - 1) // args.chunk_size
+    planner = HypothesisPlanner(
+        total_chunks,
+        target_puzzle=puzzle.number,
+        seed=args.seed,
+    )
+    seen: set[int] = set()
+    preview = []
+    for _ in range(min(args.preview, total_chunks)):
+        candidate = planner.next_unseen(seen)
+        seen.add(candidate.chunk_id)
+        start = puzzle.start + candidate.chunk_id * args.chunk_size
+        end = min(start + args.chunk_size - 1, puzzle.end)
+        preview.append(
+            {
+                "cycle": candidate.cycle,
+                "analysis_performed": candidate.analysis_performed,
+                "model": candidate.model,
+                "model_validated": candidate.model_validated,
+                "cell": candidate.cell,
+                "chunk_id": candidate.chunk_id,
+                "start": f"{start:x}",
+                "end": f"{end:x}",
+                "keys": end - start + 1,
+            }
+        )
+    print(
+        json.dumps(
+            {
+                "experimental": True,
+                "guaranteed_probability_lift": False,
+                "ratio": {"research_percent": 10, "search_percent": 90},
+                "report": planner.last_report,
+                "preview": preview,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def _engine_from_args(args: argparse.Namespace):
     from .engine import BitCrackEngine, EngineTuning
 
@@ -392,6 +438,9 @@ def command_local_setup(args: argparse.Namespace) -> int:
         resume_temperature_c=args.resume_temp,
         thermal_poll_seconds=args.thermal_poll_seconds,
         thermal_max_retries=args.thermal_retries,
+        hypothesis_enabled=args.mode == "hypothesis",
+        hypothesis_research_percent=10,
+        hypothesis_search_percent=90,
     )
     save_profile(profile_path, profile)
 
@@ -399,6 +448,8 @@ def command_local_setup(args: argparse.Namespace) -> int:
     print(f"GPU rate:      {profile.measured_rate_keys_per_second:,.0f} keys/s")
     print(f"Chunk target:  {profile.chunk_size:,} keys")
     print("Validation:    PASS (solved puzzle #8)")
+    if profile.hypothesis_enabled:
+        print("Hypothesis:    10% research / 90% GPU search")
     return 0
 
 
@@ -406,10 +457,39 @@ def command_local_run(args: argparse.Namespace) -> int:
     return _run_local_campaign(args)
 
 
+def command_hypothesis_enable(args: argparse.Namespace) -> int:
+    from .coordinator import Coordinator
+    from .local import load_profile, save_profile
+
+    profile = load_profile(args.profile)
+    if profile.puzzle < 18:
+        raise ValueError("Hypothesis Lab requires a target after puzzle #17")
+    updated = replace(
+        profile,
+        planner_mode="hypothesis",
+        hypothesis_enabled=True,
+        hypothesis_research_percent=10,
+        hypothesis_search_percent=90,
+    )
+    save_profile(args.profile, updated)
+    Coordinator(Path(updated.database)).enable_hypothesis(
+        research_percent=10,
+        search_percent=90,
+    )
+    print("Hypothesis Lab enabled: 10% research / 90% GPU search")
+    return 0
+
+
 def _run_local_campaign(args: argparse.Namespace) -> int:
+    from .coordinator import Coordinator
     from .local import engine_from_profile, load_profile, run_local_once
 
     profile = load_profile(args.profile)
+    if profile.hypothesis_enabled:
+        Coordinator(Path(profile.database)).enable_hypothesis(
+            research_percent=profile.hypothesis_research_percent,
+            search_percent=profile.hypothesis_search_percent,
+        )
     engine = engine_from_profile(
         profile,
         timeout_seconds=args.engine_timeout,
@@ -457,6 +537,11 @@ def command_local_status(args: argparse.Namespace) -> int:
                 "resume_c": profile.resume_temperature_c,
                 "poll_seconds": profile.thermal_poll_seconds,
                 "max_retries": profile.thermal_max_retries,
+            },
+            "hypothesis_lab": {
+                "enabled": profile.hypothesis_enabled,
+                "research_percent": profile.hypothesis_research_percent,
+                "search_percent": profile.hypothesis_search_percent,
             },
         },
         "campaign": Coordinator(Path(profile.database)).status(),
@@ -764,6 +849,22 @@ def build_parser() -> argparse.ArgumentParser:
     mosaic_parser.add_argument("--preview", type=positive_integer, default=16)
     mosaic_parser.set_defaults(handler=command_mosaic_preview)
 
+    hypothesis_parser = subparsers.add_parser(
+        "hypothesis-preview",
+        help="backtest Hypothesis Lab and preview its 10/90 range cycles",
+    )
+    hypothesis_parser.add_argument(
+        "puzzle",
+        type=int,
+        choices=[p.number for p in puzzles() if p.status == "unsolved"],
+    )
+    hypothesis_parser.add_argument(
+        "--chunk-size", type=positive_integer, default=1 << 40
+    )
+    hypothesis_parser.add_argument("--seed", default="puzzleforge-hypothesis-v1")
+    hypothesis_parser.add_argument("--preview", type=positive_integer, default=18)
+    hypothesis_parser.set_defaults(handler=command_hypothesis_preview)
+
     token_parser = subparsers.add_parser("token", help="generate a coordinator API token")
     token_parser.set_defaults(handler=command_token)
 
@@ -835,7 +936,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="target runtime per durable checkpoint chunk",
     )
     local_setup_parser.add_argument(
-        "--mode", choices=("affine", "mosaic"), default="affine"
+        "--mode", choices=("affine", "mosaic", "hypothesis"), default="hypothesis"
     )
     local_setup_parser.add_argument("--seed", default="puzzleforge-local-v1")
     local_setup_parser.add_argument("--max-temp", type=float, default=82.0)
@@ -853,6 +954,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_local_runtime_arguments(local_run_parser)
     local_run_parser.set_defaults(handler=command_local_run)
+
+    hypothesis_enable_parser = subparsers.add_parser(
+        "hypothesis-enable",
+        help="enable persistent 10/90 Hypothesis Lab on a local campaign",
+    )
+    hypothesis_enable_parser.add_argument(
+        "--profile", type=Path, default=Path(".puzzleforge/local/profile.json")
+    )
+    hypothesis_enable_parser.set_defaults(handler=command_hypothesis_enable)
 
     local_status_parser = subparsers.add_parser(
         "local-status", help="show local GPU tuning and exact durable progress"
@@ -893,7 +1003,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     coordinator_init_parser.add_argument("--seed", default="puzzleforge-distributed")
     coordinator_init_parser.add_argument(
-        "--mode", choices=("affine", "mosaic"), default="affine"
+        "--mode", choices=("affine", "mosaic", "hypothesis"), default="affine"
     )
     coordinator_init_parser.set_defaults(handler=command_coordinator_init)
 

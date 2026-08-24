@@ -28,6 +28,7 @@ Setup performs these gates in order:
 5. derive a durable chunk size from the measured rate;
 6. create `.puzzleforge/local/profile.json`, `benchmark.json`, and
    `campaign.sqlite3`.
+7. enable Hypothesis Lab with one analysis phase per nine GPU chunks.
 
 If any gate fails, the real campaign does not start.
 
@@ -90,7 +91,13 @@ puzzleforge local-app
 On Windows, double-click `Start-PuzzleForge.cmd`. The launcher creates a local
 virtual environment, installs the checked-out PuzzleForge version, detects a
 `cuBitCrack.exe`/`clBitCrack.exe` placed in the repository or
-`.puzzleforge/bin`, performs setup once, and resumes on later launches.
+`.puzzleforge/bin`, performs setup once, enables or upgrades the 10/90
+Hypothesis Lab, and resumes on later launches.
+
+Hypothesis Lab runs before the first chunk of each nine-chunk group. It uses
+CPU analysis and does not reserve or waste 10% of GPU wall time. The dashboard
+shows the active model, cycle, holdout result, and whether the selected model
+passed the validation gate.
 
 ## Tuning controls
 
@@ -111,7 +118,7 @@ benchmarking because the control range is intentionally repeated.
 
 ## Multiple owned GPUs
 
-Version 0.8 focuses on a reliable protected single-device path. Multiple cards
+Version 0.9 focuses on a reliable protected single-device path. Multiple cards
 can still use the existing coordinator/worker commands. Native local multi-GPU
 launch, per-device supervision, and adaptive power tuning are the next
 local-first milestones.

@@ -43,6 +43,7 @@ class DashboardTests(unittest.TestCase):
                 puzzle_number=71,
                 chunk_size=256,
                 seed="dashboard-tests",
+                planner_mode="hypothesis",
             )
             lease = coordinator.lease("dashboard-test", lease_seconds=60)
             coordinator.complete(
@@ -63,12 +64,13 @@ class DashboardTests(unittest.TestCase):
                 benchmark_relative_spread=0.02,
                 chunk_size=256,
                 target_chunk_seconds=300,
-                planner_mode="affine",
+                planner_mode="hypothesis",
                 seed="dashboard-tests",
                 database=str(database),
                 benchmark_report=str(root / "benchmark.json"),
                 device_probe="RTX 4090",
                 created_at="2026-08-24T00:00:00+00:00",
+                hypothesis_enabled=True,
             )
             payload = dashboard_payload(
                 profile,
@@ -77,6 +79,10 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(payload["campaign"]["checked_keys"], "256")
         self.assertGreater(float(payload["derived"]["coverage_percent"]), 0)
         self.assertEqual(payload["telemetry"]["temperature_c"], 62.0)
+        self.assertTrue(payload["campaign"]["hypothesis_lab"]["enabled"])
+        self.assertEqual(
+            payload["campaign"]["hypothesis_lab"]["report"]["search_slots"], 9
+        )
         self.assertIn(b"PUZZLE", DASHBOARD_HTML)
 
 

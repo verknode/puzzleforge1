@@ -133,6 +133,67 @@ class CoordinatorTests(unittest.TestCase):
             self.assertEqual(status["allocated_chunks"], 25)
             self.assertGreater(len(status["strategy_lanes"]), 1)
 
+    def test_hypothesis_campaign_persists_10_90_cycles_without_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "campaign.sqlite3"
+            coordinator = Coordinator.initialize(
+                path,
+                puzzle_number=71,
+                chunk_size=1 << 40,
+                seed="hypothesis-coordinator-test",
+                planner_mode="hypothesis",
+            )
+            leases = [
+                coordinator.lease(
+                    f"lab-{index}", lease_seconds=60, now_epoch=1000
+                )
+                for index in range(12)
+            ]
+            reopened = Coordinator(path)
+            leases.append(
+                reopened.lease("lab-reopened", lease_seconds=60, now_epoch=1001)
+            )
+            chunk_ids = [lease.chunk_id for lease in leases]
+            status = reopened.status(now_epoch=1002)
+
+        self.assertEqual(len(chunk_ids), len(set(chunk_ids)))
+        self.assertTrue(
+            all(lease.strategy_lane.startswith("hypothesis:") for lease in leases)
+        )
+        self.assertEqual(status["planner_mode"], "hypothesis")
+        self.assertEqual(status["hypothesis_lab"]["research_percent"], 10)
+        self.assertEqual(status["hypothesis_lab"]["search_percent"], 90)
+        self.assertEqual(status["hypothesis_lab"]["cycle"], 2)
+        self.assertIsNotNone(status["hypothesis_lab"]["report"])
+
+    def test_hypothesis_can_take_over_existing_campaign_without_repeats(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            coordinator = self.make_coordinator(
+                directory,
+                chunk_size=1 << 40,
+            )
+            before = [
+                coordinator.lease(
+                    f"affine-{index}", lease_seconds=60, now_epoch=1000
+                )
+                for index in range(3)
+            ]
+            coordinator.enable_hypothesis()
+            after = [
+                coordinator.lease(
+                    f"hypothesis-{index}", lease_seconds=60, now_epoch=1001
+                )
+                for index in range(12)
+            ]
+            status = coordinator.status(now_epoch=1002)
+
+        chunk_ids = [lease.chunk_id for lease in before + after]
+        self.assertEqual(len(chunk_ids), len(set(chunk_ids)))
+        self.assertEqual(status["planner_mode"], "hypothesis")
+        self.assertTrue(
+            all(lease.strategy_lane.startswith("hypothesis:") for lease in after)
+        )
+
     def test_v1_database_is_migrated_without_losing_campaign(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "campaign.sqlite3"
@@ -200,7 +261,7 @@ class CoordinatorTests(unittest.TestCase):
             coordinator = Coordinator(path)
             status = coordinator.status(now_epoch=1000)
             lease = coordinator.lease("gpu-migrated", lease_seconds=60, now_epoch=1000)
-            self.assertEqual(status["schema_version"], 2)
+            self.assertEqual(status["schema_version"], 3)
             self.assertEqual(status["planner_mode"], "affine")
             self.assertEqual(lease.strategy_lane, "affine")
 
