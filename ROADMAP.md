@@ -49,6 +49,8 @@
 - [x] Persistent Hypothesis Lab 10/90 analysis/search cycles
 - [x] Multiple-testing-adjusted validation labels for measured lift
 - [x] Automatic uniform fallback for strategies without measurable lift
+- [x] Fingerprinted 126-model registry with 70 gated and 56 shadow models
+- [x] Synthetic-uniform maximum-statistic calibration and stability gate
 - [x] Read-only Vast.ai and RunPod catalog adapters
 - [x] Measured price/performance qualification and dry-run selection
 - [x] Hard hourly/daily budget policy before any provisioning

@@ -20,11 +20,15 @@ class HypothesisTests(unittest.TestCase):
         self.assertEqual(report.observations, 70)
         self.assertEqual(report.holdouts, 54)
         self.assertEqual(report.search_slots, 9)
-        self.assertEqual(len(report.scores), 7)
-        if report.uniform_fallback:
-            self.assertEqual(report.selected_model, "uniform")
-        else:
-            self.assertIn(report.selected_model, {score.name for score in report.scores})
+        self.assertEqual(report.model_count, 126)
+        self.assertEqual(report.eligible_model_count, 70)
+        self.assertEqual(report.shadow_model_count, 56)
+        self.assertLessEqual(len(report.scores), 20)
+        self.assertEqual(report.selected_model, "uniform")
+        self.assertTrue(report.uniform_fallback)
+        self.assertFalse(report.selected_model_validated)
+        self.assertEqual(report.validated_model_count, 0)
+        self.assertIn(report.best_candidate, {score.name for score in report.scores})
         self.assertIn("does not prove", report.warning)
 
     def test_one_analysis_phase_feeds_nine_unique_search_slots(self) -> None:

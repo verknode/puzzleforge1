@@ -28,7 +28,8 @@ Setup performs these gates in order:
 5. derive a durable chunk size from the measured rate;
 6. create `.puzzleforge/local/profile.json`, `benchmark.json`, and
    `campaign.sqlite3`.
-7. enable Hypothesis Lab with one analysis phase per nine GPU chunks.
+7. enable the 126-model Hypothesis Lab with one analysis phase per nine GPU
+   chunks.
 
 If any gate fails, the real campaign does not start.
 
@@ -94,10 +95,10 @@ virtual environment, installs the checked-out PuzzleForge version, detects a
 `.puzzleforge/bin`, performs setup once, enables or upgrades the 10/90
 Hypothesis Lab, and resumes on later launches.
 
-Hypothesis Lab runs before the first chunk of each nine-chunk group. It uses
-CPU analysis and does not reserve or waste 10% of GPU wall time. The dashboard
-shows the active model, cycle, holdout result, and whether the selected model
-passed the validation gate.
+Hypothesis Lab runs before the first chunk of each nine-chunk group. Model Zoo
+uses CPU analysis and does not reserve or waste 10% of GPU wall time. The
+dashboard shows the active model, cycle, holdout result, and whether the
+selected model passed the validation gate.
 
 ## Tuning controls
 

@@ -83,6 +83,10 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(
             payload["campaign"]["hypothesis_lab"]["report"]["search_slots"], 9
         )
+        self.assertEqual(
+            payload["campaign"]["hypothesis_lab"]["report"]["model_count"], 126
+        )
+        self.assertIn(b"Model Zoo", DASHBOARD_HTML)
         self.assertIn(b"PUZZLE", DASHBOARD_HTML)
 
 

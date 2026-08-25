@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import hashlib
-import math
-import statistics
 from dataclasses import asdict, dataclass, replace
 from functools import lru_cache
 from typing import Collection
 
 from .crypto import p2pkh_address_from_private_key
+from .model_zoo import (
+    MODEL_ZOO_VERSION,
+    ModelScore,
+    analyze_model_zoo,
+    model_density,
+)
 from .mosaic import AffineOrder
 
 
@@ -16,16 +20,6 @@ DATASET_SOURCE = (
     "6bbd33dcefe2b4d039f96f437e86ea5f918de495/BTC-Solved-Unsolved.txt"
 )
 GRID_CELLS = 256
-MIN_TRAINING_OBSERVATIONS = 16
-MODEL_NAMES = (
-    "histogram-8",
-    "histogram-16",
-    "kde-wide",
-    "kde-narrow",
-    "recent-kde",
-    "lag-near",
-    "lag-delta",
-)
 
 
 # Public solved challenge vectors.  Each line is puzzle,key_hex,address.  The
@@ -118,20 +112,6 @@ class SolvedObservation:
 
 
 @dataclass(frozen=True, slots=True)
-class HypothesisScore:
-    name: str
-    holdouts: int
-    mean_log_lift: float
-    geometric_lift: float
-    p_value: float
-    adjusted_p_value: float
-    validated: bool
-
-    def to_dict(self) -> dict[str, object]:
-        return asdict(self)
-
-
-@dataclass(frozen=True, slots=True)
 class HypothesisReport:
     target_puzzle: int
     dataset_source: str
@@ -144,7 +124,18 @@ class HypothesisReport:
     search_percent: int
     search_slots: int
     cycle: int
-    scores: tuple[HypothesisScore, ...]
+    model_zoo_version: int
+    model_count: int
+    eligible_model_count: int
+    shadow_model_count: int
+    validated_model_count: int
+    registry_fingerprint: str
+    calibration_trials: int
+    familywise_alpha: float
+    null_max_95pct: float
+    best_candidate: str
+    best_shadow_model: str | None
+    scores: tuple[ModelScore, ...]
     selected_cells: tuple[int, ...] = ()
     warning: str = (
         "Experimental ordering only; measured historical lift does not prove "
@@ -214,119 +205,46 @@ def analyze_hypotheses(
         for observation in solved_observations()
         if observation.number < target_puzzle
     )
-    if len(training) <= MIN_TRAINING_OBSERVATIONS:
-        raise ValueError(
-            "Hypothesis Lab requires more solved observations before the target"
-        )
-
-    score_values = tuple(_backtest(name, training) for name in MODEL_NAMES)
-    ranked = sorted(
-        score_values,
-        key=lambda score: (
-            score.validated,
-            score.mean_log_lift,
-            -score.adjusted_p_value,
-            score.name,
+    positions = tuple(observation.position for observation in training)
+    zoo = analyze_model_zoo(positions)
+    selected_score = next(
+        (
+            score
+            for score in zoo.scores
+            if score.name == (
+                zoo.selected_model
+                if zoo.selected_model_validated
+                else zoo.best_candidate
+            )
         ),
-        reverse=True,
+        zoo.scores[0],
     )
-    validated = [score for score in ranked if score.validated]
-    selected = validated[0] if validated else ranked[0]
-    selected_model = selected.name if validated else "uniform"
     search_slots = max(1, round(search_percent / research_percent))
     return HypothesisReport(
         target_puzzle=target_puzzle,
         dataset_source=DATASET_SOURCE,
         observations=len(training),
-        holdouts=selected.holdouts,
-        selected_model=selected_model,
-        selected_model_validated=bool(validated),
-        uniform_fallback=not validated,
+        holdouts=selected_score.holdouts,
+        selected_model=zoo.selected_model,
+        selected_model_validated=zoo.selected_model_validated,
+        uniform_fallback=not zoo.selected_model_validated,
         research_percent=research_percent,
         search_percent=search_percent,
         search_slots=search_slots,
         cycle=cycle,
-        scores=tuple(ranked),
+        model_zoo_version=MODEL_ZOO_VERSION,
+        model_count=zoo.model_count,
+        eligible_model_count=zoo.eligible_model_count,
+        shadow_model_count=zoo.shadow_model_count,
+        validated_model_count=zoo.validated_model_count,
+        registry_fingerprint=zoo.registry_fingerprint,
+        calibration_trials=zoo.calibration_trials,
+        familywise_alpha=zoo.familywise_alpha,
+        null_max_95pct=zoo.null_max_95pct,
+        best_candidate=zoo.best_candidate,
+        best_shadow_model=zoo.best_shadow_model,
+        scores=zoo.scores,
     )
-
-
-def _backtest(
-    name: str, observations: tuple[SolvedObservation, ...]
-) -> HypothesisScore:
-    log_lifts: list[float] = []
-    for index in range(MIN_TRAINING_OBSERVATIONS, len(observations)):
-        training = tuple(item.position for item in observations[:index])
-        actual = observations[index].position
-        density = max(_density(name, training, actual), 1e-12)
-        log_lifts.append(math.log(density))
-
-    mean_log_lift = statistics.fmean(log_lifts)
-    if len(log_lifts) > 1:
-        deviation = statistics.stdev(log_lifts)
-        standard_error = deviation / math.sqrt(len(log_lifts))
-    else:
-        standard_error = math.inf
-    z_score = mean_log_lift / standard_error if standard_error > 0 else 0.0
-    p_value = 0.5 * math.erfc(z_score / math.sqrt(2))
-    adjusted = min(1.0, p_value * len(MODEL_NAMES))
-    return HypothesisScore(
-        name=name,
-        holdouts=len(log_lifts),
-        mean_log_lift=mean_log_lift,
-        geometric_lift=math.exp(mean_log_lift),
-        p_value=p_value,
-        adjusted_p_value=adjusted,
-        validated=mean_log_lift > 0 and adjusted < 0.05,
-    )
-
-
-def _density(name: str, values: tuple[float, ...], position: float) -> float:
-    if name == "uniform":
-        return 1.0
-    if not values:
-        return 1.0
-    if name == "histogram-8":
-        return _histogram_density(values, position, 8)
-    if name == "histogram-16":
-        return _histogram_density(values, position, 16)
-    if name == "kde-wide":
-        return _kde_density(values, position, 0.10)
-    if name == "kde-narrow":
-        return _kde_density(values, position, 0.04)
-    if name == "recent-kde":
-        return _kde_density(values[-16:], position, 0.08)
-    if name == "lag-near":
-        return _kde_density((values[-1],), position, 0.12)
-    if name == "lag-delta":
-        recent = values[-17:]
-        deltas = [right - left for left, right in zip(recent, recent[1:])]
-        predicted = values[-1] + (statistics.median(deltas) if deltas else 0.0)
-        predicted = min(1.0, max(0.0, predicted))
-        return _kde_density((predicted,), position, 0.12)
-    raise ValueError(f"unknown hypothesis model: {name}")
-
-
-def _histogram_density(
-    values: tuple[float, ...], position: float, bins: int
-) -> float:
-    counts = [0] * bins
-    for value in values:
-        counts[min(bins - 1, int(value * bins))] += 1
-    index = min(bins - 1, max(0, int(position * bins)))
-    alpha = 1.0
-    return (counts[index] + alpha) / (len(values) + alpha * bins) * bins
-
-
-def _kde_density(
-    values: tuple[float, ...], position: float, bandwidth: float
-) -> float:
-    coefficient = 1.0 / (len(values) * bandwidth * math.sqrt(2 * math.pi))
-    total = 0.0
-    for value in values:
-        for center in (value, -value, 2.0 - value):
-            distance = (position - center) / bandwidth
-            total += math.exp(-0.5 * distance * distance)
-    return max(total * coefficient, 1e-12)
 
 
 def _validate_ratio(research_percent: int, search_percent: int) -> None:
@@ -482,7 +400,7 @@ class HypothesisPlanner:
         ranked_cells = sorted(
             range(self.grid_cells),
             key=lambda cell: (
-                _density(
+                model_density(
                     report.selected_model,
                     positions,
                     (cell + 0.5) / self.grid_cells,

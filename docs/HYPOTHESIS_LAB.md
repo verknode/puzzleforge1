@@ -28,23 +28,24 @@ The bundled observations contain public solved challenge vectors #1-#70 from
 - independently derives every compressed P2PKH address;
 - refuses to schedule from the dataset if any vector fails.
 
-## Models and evidence gate
+## Model Zoo and evidence gate
 
-The fixed model set contains 8-bin and 16-bin histograms, two kernel-density
-bandwidths, a recent-window density, a previous-position model, and a recent
-delta model. For each historical target after the first 16 observations, the
-model is trained only on earlier puzzles. The held-out value is never included
-in its own prediction.
+Version 0.10 replaces the seven fixed candidates with a fingerprinted registry
+of 126 parameterized models. Seventy are promotion-eligible and 56 flexible
+families run shadow-only. The families cover distributions, bandwidth and
+window sweeps, lags, deltas, autoregression, residues, bit structure, spectral
+fits, XOR relationships, and simple generator/hash fingerprints.
 
-The report compares geometric density lift against a uniform density, computes
-a one-sided score, and applies a multiple-model adjustment. A model is labelled
-`validated` only when its adjusted value is below 0.05 and its forward log lift
-is positive.
+For each historical target after the first 16 observations, a model is trained
+only on earlier puzzles. The held-out value is never included in its own
+prediction. All eligible models are calibrated together against 128 synthetic
+uniform histories. Promotion requires positive early and late forward scores
+and an empirical family-wide maximum-statistic value of at most 0.05.
 
 With the currently bundled #1-#70 dataset, no tested model passes that gate.
-The planner therefore rejects the speculative models and uses a seeded uniform
-permutation for the next nine chunks. The dashboard labels this `UNIFORM
-FALLBACK`. A hypothesis receives priority only after passing the gate.
+The planner therefore uses a seeded uniform permutation for the next nine
+chunks. The dashboard labels this `UNIFORM FALLBACK`. Shadow models cannot
+receive GPU work. See [MODEL_ZOO.md](MODEL_ZOO.md) for the registry and gate.
 
 ## Range selection
 
@@ -57,7 +58,7 @@ transactionally in `campaign.sqlite3`.
 Preview without starting a GPU process:
 
 ```bash
-puzzleforge hypothesis-preview 71 --chunk-size 0x10000000000 --preview 18
+puzzleforge hypothesis-preview 71 --chunk-size 0x10000000000 --preview 18 --top-models 8
 ```
 
 Enable it on an existing local campaign without losing previous coverage:

@@ -237,13 +237,19 @@ def command_hypothesis_preview(args: argparse.Namespace) -> int:
                 "keys": end - start + 1,
             }
         )
+    report = planner.last_report
+    if report is not None:
+        report = dict(report)
+        scores = report.get("scores")
+        if isinstance(scores, list):
+            report["scores"] = scores[: args.top_models]
     print(
         json.dumps(
             {
                 "experimental": True,
                 "guaranteed_probability_lift": False,
                 "ratio": {"research_percent": 10, "search_percent": 90},
-                "report": planner.last_report,
+                "report": report,
                 "preview": preview,
             },
             indent=2,
@@ -863,6 +869,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hypothesis_parser.add_argument("--seed", default="puzzleforge-hypothesis-v1")
     hypothesis_parser.add_argument("--preview", type=positive_integer, default=18)
+    hypothesis_parser.add_argument(
+        "--top-models",
+        type=positive_integer,
+        default=12,
+        help="number of ranked Model Zoo scores to include",
+    )
     hypothesis_parser.set_defaults(handler=command_hypothesis_preview)
 
     token_parser = subparsers.add_parser("token", help="generate a coordinator API token")
