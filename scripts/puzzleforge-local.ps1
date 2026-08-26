@@ -3,7 +3,6 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $VenvRoot = Join-Path $RepoRoot ".venv"
 $VenvPython = Join-Path $VenvRoot "Scripts\python.exe"
-$PuzzleForge = Join-Path $VenvRoot "Scripts\puzzleforge.exe"
 $Profile = Join-Path $RepoRoot ".puzzleforge\local\profile.json"
 
 Set-Location $RepoRoot
@@ -37,11 +36,11 @@ if (-not (Test-Path $Profile)) {
     if (-not $Engine) {
         throw "Place cuBitCrack.exe in the PuzzleForge folder and run Start-PuzzleForge.cmd again."
     }
-    & $PuzzleForge local-setup --binary $Engine --puzzle 71
+    & $VenvPython -m puzzleforge local-setup --binary $Engine --puzzle 71
     if ($LASTEXITCODE -ne 0) { throw "PuzzleForge local setup failed." }
 }
 
-& $PuzzleForge hypothesis-enable
+& $VenvPython -m puzzleforge hypothesis-enable
 if ($LASTEXITCODE -ne 0) { throw "Could not enable Hypothesis Lab." }
 
-& $PuzzleForge local-app
+& $VenvPython -m puzzleforge local-app
