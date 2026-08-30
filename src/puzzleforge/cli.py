@@ -486,9 +486,47 @@ def command_hypothesis_enable(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_local_sweep_configure(args: argparse.Namespace) -> int:
+    from .local import load_profile, save_profile
+    from .sweep import decode_mainnet_p2wpkh
+
+    profile = load_profile(args.profile)
+    if args.disable:
+        updated = replace(profile, auto_sweep_enabled=False)
+        save_profile(args.profile, updated)
+        print("Auto-sweep disabled. The saved destination was retained.")
+        return 0
+    if not args.address:
+        raise ValueError("a bc1q destination address is required")
+    decode_mainnet_p2wpkh(args.address)
+    updated = replace(
+        profile,
+        auto_sweep_enabled=True,
+        sweep_address=args.address.lower(),
+        sweep_fee_floor_sat_vb=args.fee_floor,
+        sweep_fee_cap_sat_vb=args.fee_cap,
+    )
+    save_profile(args.profile, updated)
+    print("AUTO-SWEEP ENABLED")
+    print("Network:      Bitcoin mainnet")
+    print(f"Destination:  {updated.sweep_address}")
+    print(
+        "Fee policy:   fastest available estimate, "
+        f"bounded to {updated.sweep_fee_floor_sat_vb}-"
+        f"{updated.sweep_fee_cap_sat_vb} sat/vB"
+    )
+    print("Private key:  local signing only; never sent to an API")
+    return 0
+
+
 def _run_local_campaign(args: argparse.Namespace) -> int:
     from .coordinator import Coordinator
-    from .local import engine_from_profile, load_profile, run_local_once
+    from .local import (
+        engine_from_profile,
+        load_profile,
+        resume_pending_sweep,
+        run_local_once,
+    )
 
     profile = load_profile(args.profile)
     if profile.hypothesis_enabled:
@@ -496,6 +534,17 @@ def _run_local_campaign(args: argparse.Namespace) -> int:
             research_percent=profile.hypothesis_research_percent,
             search_percent=profile.hypothesis_search_percent,
         )
+    campaign_status = Coordinator(Path(profile.database)).status()
+    if campaign_status["state"] == "found":
+        receipt = resume_pending_sweep(profile)
+        if receipt is not None and receipt.broadcast:
+            print(f"AUTO-SWEEP BROADCAST txid={receipt.txid}")
+            return 0
+        if receipt is not None:
+            print(f"AUTO-SWEEP PENDING: {receipt.detail}", file=sys.stderr)
+            return 1
+        print("Campaign already found a verified match; no work remains.")
+        return 0
     engine = engine_from_profile(
         profile,
         timeout_seconds=args.engine_timeout,
@@ -548,6 +597,12 @@ def command_local_status(args: argparse.Namespace) -> int:
                 "enabled": profile.hypothesis_enabled,
                 "research_percent": profile.hypothesis_research_percent,
                 "search_percent": profile.hypothesis_search_percent,
+            },
+            "auto_sweep": {
+                "enabled": profile.auto_sweep_enabled,
+                "destination_address": profile.sweep_address,
+                "fee_floor_sat_vb": profile.sweep_fee_floor_sat_vb,
+                "fee_cap_sat_vb": profile.sweep_fee_cap_sat_vb,
             },
         },
         "campaign": Coordinator(Path(profile.database)).status(),
@@ -975,6 +1030,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile", type=Path, default=Path(".puzzleforge/local/profile.json")
     )
     hypothesis_enable_parser.set_defaults(handler=command_hypothesis_enable)
+
+    local_sweep_parser = subparsers.add_parser(
+        "local-sweep-configure",
+        help="configure automatic sweep of a verified public-puzzle reward",
+    )
+    local_sweep_parser.add_argument("address", nargs="?")
+    local_sweep_parser.add_argument(
+        "--profile", type=Path, default=Path(".puzzleforge/local/profile.json")
+    )
+    local_sweep_parser.add_argument("--fee-floor", type=positive_integer, default=25)
+    local_sweep_parser.add_argument("--fee-cap", type=positive_integer, default=500)
+    local_sweep_parser.add_argument("--disable", action="store_true")
+    local_sweep_parser.set_defaults(handler=command_local_sweep_configure)
 
     local_status_parser = subparsers.add_parser(
         "local-status", help="show local GPU tuning and exact durable progress"
