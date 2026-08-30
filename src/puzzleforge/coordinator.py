@@ -947,6 +947,41 @@ class Coordinator:
                 connection.rollback()
                 raise
 
+    def scrub_found_key(self, expected_key_hex: str) -> bool:
+        """Remove a recovered key after a signed sweep is durably broadcast."""
+
+        normalized = _normalize_key_hex(expected_key_hex)
+        if normalized is None:
+            raise ValueError("expected key is required")
+        now_text = utc_now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                campaign = self._load_campaign(connection)
+                if campaign["state"] != "found":
+                    raise LeaseRejected("campaign has not found a key")
+                stored = campaign["found_key_hex"]
+                if stored is None:
+                    connection.commit()
+                    return False
+                if stored != normalized:
+                    raise LeaseRejected("found key does not match the expected key")
+                connection.execute(
+                    "UPDATE work SET found_key_hex = NULL, updated_at = ? "
+                    "WHERE result_kind = 'found' AND found_key_hex = ?",
+                    (now_text, normalized),
+                )
+                connection.execute(
+                    "UPDATE campaign SET found_key_hex = NULL, updated_at = ? WHERE id = 1",
+                    (now_text,),
+                )
+                connection.commit()
+                return True
+            except BaseException:
+                if connection.in_transaction:
+                    connection.rollback()
+                raise
+
     def status(self, *, now_epoch: float | None = None) -> dict[str, Any]:
         now_epoch = time.time() if now_epoch is None else float(now_epoch)
         now_text = utc_now()
