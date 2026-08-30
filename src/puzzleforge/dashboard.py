@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 from .coordinator import Coordinator
 from .local import LocalProfile, load_profile
+from .sweep import load_sweep_record
 from .telemetry import TelemetryCache
 
 
@@ -28,6 +29,22 @@ def dashboard_payload(
             Decimal(str(profile.measured_rate_keys_per_second)) * Decimal(86_400),
         )
         benchmark_day_percent = benchmark_day / total * Decimal(100)
+    sweep_record = load_sweep_record(Path(profile.database).with_name("sweep.json"))
+    sweep = {
+        "state": (
+            str(sweep_record.get("state", "pending"))
+            if sweep_record
+            else ("armed" if profile.auto_sweep_enabled else "disabled")
+        ),
+        "destination_address": profile.sweep_address,
+        "txid": None if not sweep_record else sweep_record.get("txid"),
+        "output_value_sats": (
+            None if not sweep_record else sweep_record.get("output_value_sats")
+        ),
+        "fee_sats": None if not sweep_record else sweep_record.get("fee_sats"),
+        "detail": "" if not sweep_record else sweep_record.get("detail", ""),
+        "updated_at": None if not sweep_record else sweep_record.get("updated_at"),
+    }
     return {
         "schema": 1,
         "local": {
@@ -51,8 +68,15 @@ def dashboard_payload(
                 "research_percent": profile.hypothesis_research_percent,
                 "search_percent": profile.hypothesis_search_percent,
             },
+            "auto_sweep": {
+                "enabled": profile.auto_sweep_enabled,
+                "destination_address": profile.sweep_address,
+                "fee_floor_sat_vb": profile.sweep_fee_floor_sat_vb,
+                "fee_cap_sat_vb": profile.sweep_fee_cap_sat_vb,
+            },
         },
         "campaign": campaign,
+        "sweep": sweep,
         "telemetry": telemetry,
         "derived": {
             "coverage_percent": str(coverage_percent),
@@ -152,11 +176,12 @@ main{width:min(1120px,100%);margin:auto;padding:28px 18px 48px}header{display:fl
 <article class="card wide"><div class="label">Campaign</div><div class="row"><span>Puzzle</span><b id="puzzle">—</b></div><div class="row"><span>Mode</span><b id="mode">—</b></div><div class="row"><span>Completed chunks</span><b id="chunks">—</b></div><div class="row"><span>Failures / retries</span><b id="failures">—</b></div></article>
 <article class="card full"><div class="label">Hypothesis Lab / Model Zoo</div><div class="row"><span>Cycle</span><b id="labCycle">—</b></div><div class="row"><span>Research / GPU search</span><b id="labRatio">—</b></div><div class="row"><span>Models / eligible / shadow</span><b id="labCounts">—</b></div><div class="row"><span>Best eligible candidate</span><b id="labCandidate">—</b></div><div class="row"><span>Selected model</span><b id="labModel">—</b></div><div class="row"><span>Empirical evidence gate</span><b id="labEvidence">—</b></div></article>
 <article class="card full"><div class="label">Local profile</div><div class="row"><span>24h coverage at benchmark speed</span><b id="day">—</b></div><div class="row"><span>Durable chunk target</span><b id="chunkTarget">—</b></div><div class="row"><span>Configured thermal policy</span><b id="thermalGuard">—</b></div><div class="row"><span>GPU memory</span><b id="memory">—</b></div><div class="row"><span>Last update</span><b id="updated">—</b></div><div class="meta error" id="error"></div></article>
+<article class="card full"><div class="label">Verified-match auto-sweep</div><div class="row"><span>Status</span><b id="sweepState">—</b></div><div class="row"><span>Destination</span><b id="sweepAddress">—</b></div><div class="row"><span>Transaction</span><b id="sweepTxid">—</b></div><div class="row"><span>Amount / fee</span><b id="sweepAmount">—</b></div></article>
 </section></main>
 <script>
 const $=id=>document.getElementById(id),num=v=>Number(v||0),fmt=n=>new Intl.NumberFormat('en',{maximumFractionDigits:2,notation:'compact'}).format(n),pct=v=>{const n=num(v);return n===0?'0%':n<.000001?n.toExponential(3)+'%':n.toFixed(Math.min(8,Math.max(3,-Math.floor(Math.log10(n))+2)))+'%'};
 async function refresh(){try{const response=await fetch('/api/status',{cache:'no-store'});const d=await response.json();if(!response.ok)throw Error(d.error||response.status);const c=d.campaign,l=d.local,t=d.telemetry||{},x=d.derived;
-$('state').textContent=c.state;$('dot').style.background=c.state==='running'?'var(--good)':c.state==='found'?'var(--hot)':'var(--muted)';$('speed').textContent=fmt(l.measured_rate_keys_per_second);$('coverage').textContent=pct(x.coverage_percent);$('coverageBar').style.width=Math.min(100,num(x.coverage_percent))+'%';$('checked').textContent=fmt(num(c.checked_keys))+' / '+fmt(num(c.total_keys))+' checked';$('puzzle').textContent='#'+c.puzzle;$('mode').textContent=c.planner_mode.toUpperCase();$('chunks').textContent=c.completed_chunks;$('failures').textContent=c.worker_failures+' / '+c.retry_queue;$('day').textContent=pct(x.benchmark_day_percent);$('chunkTarget').textContent=l.target_chunk_seconds+' sec / '+fmt(l.chunk_size);$('thermalGuard').textContent=l.thermal_guard.maximum_c+'°C → '+l.thermal_guard.resume_c+'°C';$('updated').textContent=new Date(c.updated_at).toLocaleString();const h=c.hypothesis_lab||{},r=h.report||{},s=(r.scores||[]).find(v=>v.name===r.selected_model);$('labCycle').textContent=h.enabled?h.cycle:'OFF';$('labRatio').textContent=h.enabled?h.research_percent+'% / '+h.search_percent+'%':'—';$('labCounts').textContent=r.model_count!==undefined?r.model_count+' / '+r.eligible_model_count+' / '+r.shadow_model_count:'pending';$('labCandidate').textContent=r.best_candidate||'pending';$('labModel').textContent=r.selected_model||'pending';$('labEvidence').textContent=r.selected_model?(r.uniform_fallback?'UNIFORM FALLBACK / 0 validated':r.selected_model_validated?'VALIDATED / '+r.validated_model_count:('experimental / '+(s?Number(s.geometric_lift).toFixed(3)+'× holdout':'no score'))):'pending';
+$('state').textContent=c.state;$('dot').style.background=c.state==='running'?'var(--good)':c.state==='found'?'var(--hot)':'var(--muted)';$('speed').textContent=fmt(l.measured_rate_keys_per_second);$('coverage').textContent=pct(x.coverage_percent);$('coverageBar').style.width=Math.min(100,num(x.coverage_percent))+'%';$('checked').textContent=fmt(num(c.checked_keys))+' / '+fmt(num(c.total_keys))+' checked';$('puzzle').textContent='#'+c.puzzle;$('mode').textContent=c.planner_mode.toUpperCase();$('chunks').textContent=c.completed_chunks;$('failures').textContent=c.worker_failures+' / '+c.retry_queue;$('day').textContent=pct(x.benchmark_day_percent);$('chunkTarget').textContent=l.target_chunk_seconds+' sec / '+fmt(l.chunk_size);$('thermalGuard').textContent=l.thermal_guard.maximum_c+'°C → '+l.thermal_guard.resume_c+'°C';$('updated').textContent=new Date(c.updated_at).toLocaleString();const h=c.hypothesis_lab||{},report=h.report||{},score=(report.scores||[]).find(v=>v.name===report.selected_model),w=d.sweep||{};$('labCycle').textContent=h.enabled?h.cycle:'OFF';$('labRatio').textContent=h.enabled?h.research_percent+'% / '+h.search_percent+'%':'—';$('labCounts').textContent=report.model_count!==undefined?report.model_count+' / '+report.eligible_model_count+' / '+report.shadow_model_count:'pending';$('labCandidate').textContent=report.best_candidate||'pending';$('labModel').textContent=report.selected_model||'pending';$('labEvidence').textContent=report.selected_model?(report.uniform_fallback?'UNIFORM FALLBACK / 0 validated':report.selected_model_validated?'VALIDATED / '+report.validated_model_count:('experimental / '+(score?Number(score.geometric_lift).toFixed(3)+'× holdout':'no score'))):'pending';$('sweepState').textContent=(w.state||'disabled').toUpperCase();$('sweepAddress').textContent=w.destination_address||'not configured';$('sweepTxid').textContent=w.txid||'—';$('sweepAmount').textContent=w.output_value_sats?fmt(w.output_value_sats)+' sats / '+fmt(w.fee_sats)+' sats':'—';
 if(t.available){$('gpuName').textContent='LOCAL GPU / '+t.name;$('load').textContent=Math.round(num(t.utilization_percent));$('loadBar').style.width=Math.min(100,num(t.utilization_percent))+'%';$('temp').textContent=Math.round(num(t.temperature_c));$('power').textContent=num(t.power_w).toFixed(0);$('powerLimit').textContent='limit '+num(t.power_limit_w).toFixed(0)+' W';$('clock').textContent=fmt(num(t.sm_clock_mhz))+' MHz';$('memory').textContent=fmt(num(t.memory_used_mib))+' / '+fmt(num(t.memory_total_mib))+' MiB';$('error').textContent=''}else{$('error').textContent=t.error||'GPU telemetry unavailable'}
 }catch(e){$('state').textContent='OFFLINE';$('dot').style.background='var(--bad)';$('error').textContent=e.message}}
 refresh();setInterval(refresh,3000);
