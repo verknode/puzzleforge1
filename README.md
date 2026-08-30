@@ -5,8 +5,9 @@ public Bitcoin Puzzle Transaction. It targets the still-open address-only
 puzzles #71 through #74 and includes solved puzzle #8 as an end-to-end test.
 
 The project deliberately accepts only puzzles in its reviewed registry. It is
-not a general wallet scanner, seed finder, recovery service, or transaction
-broadcaster.
+not a general wallet scanner, seed finder, recovery service, or general-purpose
+transaction broadcaster. Its only transaction feature is an opt-in local sweep
+of a key independently verified against a registered public-puzzle address.
 
 ## What works today
 
@@ -29,6 +30,7 @@ broadcaster.
 - exact coverage accounting and a random-with-replacement comparison;
 - read-only Vast.ai/RunPod catalogs and a hard-budget cloud capacity planner;
 - private-key verification against an official puzzle address;
+- opt-in local signing and dual-provider broadcast of a verified puzzle reward;
 - probability and runtime estimates that separate experimental ordering from
   proven unique coverage;
 - unit tests and GitHub Actions CI.
@@ -77,6 +79,31 @@ On Windows, `Start-PuzzleForge.cmd` creates/updates the local environment,
 performs first setup when `cuBitCrack.exe` is present, starts the campaign, and
 opens the dashboard. It also enables Hypothesis Lab for both new and existing
 local profiles. Subsequent launches resume the same durable campaign.
+
+### Arm a verified-match sweep
+
+Auto-sweep is disabled by default. Configure a Bitcoin mainnet Native SegWit
+(`bc1q`) destination only after checking it in the receiving wallet:
+
+```bash
+puzzleforge local-sweep-configure bc1qYOUR_CHECKED_ADDRESS
+```
+
+The destination and fee bounds are stored only in the local profile. If a key
+is found, PuzzleForge first verifies that it derives the registered puzzle
+address, obtains confirmed UTXOs from two independent Esplora providers, signs
+the sweep locally, saves the signed transaction atomically, and broadcasts it
+to both providers. The private key is never submitted to an API. A network
+failure leaves the exact signed transaction in `sweep.json` for idempotent
+rebroadcast at the next launch; an accepted broadcast clears the plaintext key
+from the campaign database. The dashboard reports `ARMED`, `PENDING`, or
+`BROADCAST` and shows the transaction ID.
+
+Disable automatic sweeping without deleting the saved destination:
+
+```bash
+puzzleforge local-sweep-configure --disable
+```
 
 ```bash
 puzzleforge local-status

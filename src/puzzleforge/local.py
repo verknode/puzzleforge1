@@ -9,11 +9,14 @@ import threading
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping, Protocol
+from typing import TYPE_CHECKING, Mapping, Protocol
 
 from .coordinator import Coordinator, LeaseRejected, SQLITE_MAX_INTEGER
 from .engine import BitCrackEngine, EngineOutcome, EngineTuning
 from .registry import get_puzzle
+
+if TYPE_CHECKING:
+    from .sweep import SweepNetwork, SweepReceipt
 
 
 PROFILE_SCHEMA = 1
@@ -47,6 +50,10 @@ class LocalProfile:
     hypothesis_enabled: bool = False
     hypothesis_research_percent: int = 10
     hypothesis_search_percent: int = 90
+    auto_sweep_enabled: bool = False
+    sweep_address: str = ""
+    sweep_fee_floor_sat_vb: int = 25
+    sweep_fee_cap_sat_vb: int = 500
 
     def __post_init__(self) -> None:
         if self.schema != PROFILE_SCHEMA:
@@ -98,6 +105,23 @@ class LocalProfile:
             raise ValueError(
                 "Hypothesis Lab requires a target after the training observations"
             )
+        if not isinstance(self.auto_sweep_enabled, bool):
+            raise ValueError("local profile auto-sweep flag is invalid")
+        if self.sweep_address:
+            from .sweep import decode_mainnet_p2wpkh
+
+            decode_mainnet_p2wpkh(self.sweep_address)
+        if self.auto_sweep_enabled and not self.sweep_address:
+            raise ValueError("auto-sweep requires a destination address")
+        if (
+            isinstance(self.sweep_fee_floor_sat_vb, bool)
+            or isinstance(self.sweep_fee_cap_sat_vb, bool)
+            or not 1
+            <= self.sweep_fee_floor_sat_vb
+            <= self.sweep_fee_cap_sat_vb
+            <= 10_000
+        ):
+            raise ValueError("local profile sweep fee bounds are invalid")
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -150,6 +174,16 @@ class LocalProfile:
                 hypothesis_search_percent=int(
                     payload.get("hypothesis_search_percent", 90)
                 ),
+                auto_sweep_enabled=_optional_bool(
+                    payload.get("auto_sweep_enabled", False)
+                ),
+                sweep_address=str(payload.get("sweep_address", "")),
+                sweep_fee_floor_sat_vb=int(
+                    payload.get("sweep_fee_floor_sat_vb", 25)
+                ),
+                sweep_fee_cap_sat_vb=int(
+                    payload.get("sweep_fee_cap_sat_vb", 500)
+                ),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"invalid local profile: {exc}") from exc
@@ -160,6 +194,8 @@ class LocalRun:
     outcome: str
     message: str
     found: bool = False
+    sweep_state: str | None = None
+    sweep_txid: str | None = None
 
 
 def utc_now() -> str:
@@ -297,6 +333,7 @@ def run_local_once(
     *,
     worker: str,
     lease_seconds: int = 3_600,
+    sweep_network: SweepNetwork | None = None,
 ) -> LocalRun:
     coordinator = Coordinator(Path(profile.database))
     lease = coordinator.lease(worker, lease_seconds=lease_seconds)
@@ -361,14 +398,101 @@ def run_local_once(
         elapsed_seconds=outcome.elapsed_seconds,
         rate_keys_per_second=outcome.rate_keys_per_second,
     )
+    sweep: SweepReceipt | None = None
+    if completion.found and outcome.found_key is not None and profile.auto_sweep_enabled:
+        sweep = _attempt_sweep(profile, outcome.found_key, coordinator, sweep_network)
+
+    message = (
+        f"chunk {lease.sequence} checked {outcome.checked:,} keys at "
+        f"{outcome.rate_keys_per_second:,.0f} keys/s"
+    )
+    if completion.found:
+        message = "MATCH VERIFIED. " + message
+    if sweep is not None:
+        if sweep.broadcast:
+            message += f"; AUTO-SWEEP BROADCAST txid={sweep.txid}"
+        else:
+            message += f"; AUTO-SWEEP PENDING: {sweep.detail}"
     return LocalRun(
         "found" if completion.found else "complete",
-        (
-            f"chunk {lease.sequence} checked {outcome.checked:,} keys at "
-            f"{outcome.rate_keys_per_second:,.0f} keys/s"
-        ),
+        message,
         found=completion.found,
+        sweep_state=None if sweep is None else sweep.state,
+        sweep_txid=None if sweep is None else sweep.txid,
     )
+
+
+def resume_pending_sweep(
+    profile: LocalProfile,
+    *,
+    sweep_network: SweepNetwork | None = None,
+) -> SweepReceipt | None:
+    if not profile.auto_sweep_enabled:
+        return None
+    coordinator = Coordinator(Path(profile.database))
+    status = coordinator.status()
+    if status["state"] != "found":
+        return None
+
+    from .sweep import load_sweep_record
+
+    record_path = _sweep_record_path(profile)
+    record = load_sweep_record(record_path)
+    if record and record.get("state") == "broadcast":
+        from .sweep import SweepReceipt
+
+        return SweepReceipt(
+            state="broadcast",
+            destination_address=str(record["destination_address"]),
+            txid=str(record["txid"]),
+            output_value_sats=int(record["output_value_sats"]),
+            fee_sats=int(record["fee_sats"]),
+            detail=str(record.get("detail", "")),
+        )
+
+    found_key_hex = status.get("found_key_hex")
+    if not found_key_hex:
+        return None
+    return _attempt_sweep(
+        profile,
+        int(str(found_key_hex), 16),
+        coordinator,
+        sweep_network,
+    )
+
+
+def _attempt_sweep(
+    profile: LocalProfile,
+    private_key: int,
+    coordinator: Coordinator,
+    sweep_network: SweepNetwork | None,
+) -> SweepReceipt:
+    from .sweep import SweepError, SweepReceipt, execute_sweep
+
+    puzzle = get_puzzle(profile.puzzle)
+    try:
+        receipt = execute_sweep(
+            private_key,
+            puzzle.address,
+            profile.sweep_address,
+            _sweep_record_path(profile),
+            fee_floor=profile.sweep_fee_floor_sat_vb,
+            fee_cap=profile.sweep_fee_cap_sat_vb,
+            network=sweep_network,
+        )
+    except (OSError, RuntimeError, ValueError, SweepError) as exc:
+        return SweepReceipt(
+            state="pending",
+            destination_address=profile.sweep_address,
+            detail=str(exc),
+        )
+    if receipt.broadcast:
+        coordinator.scrub_found_key(f"{private_key:064x}")
+    return receipt
+
+
+def _sweep_record_path(profile: LocalProfile) -> Path:
+    return Path(profile.database).with_name("sweep.json")
 
 
 def _release_failed_lease(

@@ -6,7 +6,11 @@ from argparse import Namespace
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from puzzleforge.cli import command_hypothesis_enable, command_local_app
+from puzzleforge.cli import (
+    command_hypothesis_enable,
+    command_local_app,
+    command_local_sweep_configure,
+)
 from puzzleforge.coordinator import Coordinator
 from puzzleforge.engine import EngineOutcome, EngineTuning
 from puzzleforge.local import (
@@ -86,6 +90,28 @@ class LocalTests(unittest.TestCase):
             loaded = load_profile(path)
         self.assertEqual(loaded, profile)
         self.assertEqual(loaded.tuning.threads, 256)
+
+    def test_auto_sweep_configuration_is_local_and_checksum_validated(self) -> None:
+        destination = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+        with tempfile.TemporaryDirectory() as directory:
+            profile_path = Path(directory) / "profile.json"
+            save_profile(profile_path, self.make_profile(directory))
+            args = Namespace(
+                profile=profile_path,
+                address=destination,
+                fee_floor=25,
+                fee_cap=500,
+                disable=False,
+            )
+            with redirect_stdout(io.StringIO()):
+                result = command_local_sweep_configure(args)
+            loaded = load_profile(profile_path)
+
+        self.assertEqual(result, 0)
+        self.assertTrue(loaded.auto_sweep_enabled)
+        self.assertEqual(loaded.sweep_address, destination)
+        self.assertEqual(loaded.sweep_fee_floor_sat_vb, 25)
+        self.assertEqual(loaded.sweep_fee_cap_sat_vb, 500)
 
     def test_explicit_binary_is_discovered(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
