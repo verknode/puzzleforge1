@@ -9,18 +9,24 @@ Puzzle Transaction challenge.
 - address derivation and candidate verification;
 - range planning, benchmarking, checkpointing, and worker coordination;
 - GPU acceleration for the registered challenge targets.
+- optional local construction, signing, and broadcast of a verified reward to
+  a preconfigured Bitcoin mainnet Native SegWit address.
 
 ## Out of scope
 
 - arbitrary wallet addresses or user-supplied target hashes;
 - seed phrase, wallet file, password, or credential recovery;
 - scanning unrelated blockchain addresses;
-- transaction construction, signing, fee replacement, or prize sweeping;
+- general-purpose transaction construction or signing for arbitrary wallets;
+- seed phrases, imported wallet keys, or user-supplied source addresses;
 - claims of predictive key patterns without reproducible evidence.
 
-Do not commit found private keys, wallet material, API tokens, or worker
-credentials. If a real puzzle key is found, stop workers and handle it outside
-this repository using an independently reviewed operational-security plan.
+Do not commit found private keys, destination addresses, wallet material, API
+tokens, or worker credentials. Auto-sweep is disabled by default and may only
+use a key independently verified against the immutable puzzle registry. Signing
+is local; only the raw signed transaction may leave the machine. Keep the local
+profile and `sweep.json` private, verify the configured destination on the
+receiving wallet, and maintain an independently reviewed recovery plan.
 
 ## Distributed deployment
 
