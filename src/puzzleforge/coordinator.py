@@ -947,6 +947,61 @@ class Coordinator:
                 connection.rollback()
                 raise
 
+    def record_verified_candidate(self, found_key_hex: str) -> Completion:
+        """Record a challenge key recovered outside a leased range scan.
+
+        Generator research never receives coverage credit.  A candidate can
+        stop the campaign only after the coordinator independently verifies
+        its interval and registered public-puzzle address.
+        """
+
+        normalized = _normalize_key_hex(found_key_hex)
+        if normalized is None:
+            raise ValueError("a recovered candidate key is required")
+        now_text = utc_now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                campaign = self._load_campaign(connection)
+                if campaign["state"] == "found":
+                    if campaign["found_key_hex"] == normalized:
+                        connection.commit()
+                        return Completion(
+                            accepted=True,
+                            idempotent=True,
+                            campaign_state="found",
+                            found=True,
+                        )
+                    raise LeaseRejected("campaign already found a different key")
+
+                puzzle = get_puzzle(campaign["puzzle"])
+                candidate = int(normalized, 16)
+                if not puzzle.start <= candidate <= puzzle.end:
+                    raise LeaseRejected("candidate is outside the published interval")
+                if p2pkh_address_from_private_key(candidate) != puzzle.address:
+                    raise LeaseRejected(
+                        "candidate failed independent address verification"
+                    )
+                connection.execute(
+                    """
+                    UPDATE campaign
+                       SET state = 'found', found_key_hex = ?, updated_at = ?
+                     WHERE id = 1
+                    """,
+                    (normalized, now_text),
+                )
+                connection.commit()
+                return Completion(
+                    accepted=True,
+                    idempotent=False,
+                    campaign_state="found",
+                    found=True,
+                )
+            except BaseException:
+                if connection.in_transaction:
+                    connection.rollback()
+                raise
+
     def scrub_found_key(self, expected_key_hex: str) -> bool:
         """Remove a recovered key after a signed sweep is durably broadcast."""
 

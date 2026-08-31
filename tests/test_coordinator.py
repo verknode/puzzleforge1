@@ -95,6 +95,28 @@ class CoordinatorTests(unittest.TestCase):
             self.assertTrue(replay.idempotent)
             self.assertEqual(coordinator.status(now_epoch=1003)["state"], "found")
 
+    def test_generator_candidate_is_verified_without_fake_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            coordinator = self.make_coordinator(directory, puzzle=8, chunk_size=128)
+            completion = coordinator.record_verified_candidate("e0")
+            replay = coordinator.record_verified_candidate("e0")
+            status = coordinator.status(now_epoch=1000)
+
+        self.assertTrue(completion.found)
+        self.assertTrue(replay.idempotent)
+        self.assertEqual(status["state"], "found")
+        self.assertEqual(status["checked_keys"], "0")
+        self.assertEqual(status["completed_chunks"], 0)
+
+    def test_generator_candidate_must_match_registered_puzzle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            coordinator = self.make_coordinator(directory, puzzle=8, chunk_size=128)
+            with self.assertRaises(LeaseRejected):
+                coordinator.record_verified_candidate("e1")
+            status = coordinator.status(now_epoch=1000)
+
+        self.assertEqual(status["state"], "running")
+
     def test_failed_work_returns_to_retry_queue(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             coordinator = self.make_coordinator(directory)

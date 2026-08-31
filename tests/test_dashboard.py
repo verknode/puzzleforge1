@@ -71,6 +71,8 @@ class DashboardTests(unittest.TestCase):
                 device_probe="RTX 4090",
                 created_at="2026-08-24T00:00:00+00:00",
                 hypothesis_enabled=True,
+                generator_lab_enabled=True,
+                generator_lab_cpu_percent=10,
             )
             payload = dashboard_payload(
                 profile,
@@ -86,7 +88,12 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(
             payload["campaign"]["hypothesis_lab"]["report"]["model_count"], 126
         )
+        self.assertTrue(payload["generator_lab"]["enabled"])
+        self.assertEqual(payload["generator_lab"]["status"], "ready")
+        self.assertEqual(payload["generator_lab"]["cpu_duty_percent"], 10)
+        self.assertEqual(payload["generator_lab"]["gpu_reserved_percent"], 0)
         self.assertIn(b"Model Zoo", DASHBOARD_HTML)
+        self.assertIn(b"Generator Lab", DASHBOARD_HTML)
         self.assertIn(b"PUZZLE", DASHBOARD_HTML)
 
 

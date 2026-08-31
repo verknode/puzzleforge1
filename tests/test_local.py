@@ -7,6 +7,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 from puzzleforge.cli import (
+    command_generator_enable,
     command_hypothesis_enable,
     command_local_app,
     command_local_sweep_configure,
@@ -157,6 +158,37 @@ class LocalTests(unittest.TestCase):
         self.assertNotEqual(previous.chunk_id, next_lease.chunk_id)
         self.assertTrue(next_lease.strategy_lane.startswith("hypothesis:"))
         self.assertTrue(status["hypothesis_lab"]["enabled"])
+
+    def test_existing_profile_can_enable_generator_lab_without_losing_work(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            profile = self.make_profile(directory)
+            profile_path = Path(directory) / "profile.json"
+            save_profile(profile_path, profile)
+            coordinator = Coordinator(Path(profile.database))
+            previous = coordinator.lease(
+                "before-generator", lease_seconds=60, now_epoch=1000
+            )
+            with redirect_stdout(io.StringIO()):
+                result = command_generator_enable(
+                    Namespace(
+                        profile=profile_path,
+                        cpu_percent=10,
+                        wordlist=None,
+                    )
+                )
+            updated = load_profile(profile_path)
+            next_lease = coordinator.lease(
+                "after-generator", lease_seconds=60, now_epoch=1001
+            )
+            state_exists = Path(updated.database).with_name(
+                "generator-lab.json"
+            ).is_file()
+
+        self.assertEqual(result, 0)
+        self.assertTrue(updated.generator_lab_enabled)
+        self.assertEqual(updated.generator_lab_cpu_percent, 10)
+        self.assertTrue(state_exists)
+        self.assertNotEqual(previous.chunk_id, next_lease.chunk_id)
 
     def test_failed_local_chunk_returns_to_retry_queue(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -25,6 +25,8 @@ of a key independently verified against a registered public-puzzle address.
 - Hypothesis Lab with a 126-model fingerprinted zoo, verified solved vectors,
   forward-only scoring, empirical uniform-null calibration,
   persistent 10/90 research-to-search cycles, and global range de-duplication;
+- Generator Lab with durable, challenge-scoped seed/generator experiments,
+  exact solved-vector holdouts, and independent target-address verification;
 - SQLite coordinator with transactional leases and automatic expired-work recovery;
 - authenticated HTTP worker protocol for many remote GPU machines;
 - exact coverage accounting and a random-with-replacement comparison;
@@ -77,8 +79,9 @@ puzzleforge local-app
 
 On Windows, `Start-PuzzleForge.cmd` creates/updates the local environment,
 performs first setup when `cuBitCrack.exe` is present, starts the campaign, and
-opens the dashboard. It also enables Hypothesis Lab for both new and existing
-local profiles. Subsequent launches resume the same durable campaign.
+opens the dashboard. It also enables Hypothesis Lab and Generator Lab for both
+new and existing local profiles. Subsequent launches resume both durable
+campaign cursors.
 
 ### Arm a verified-match sweep
 
@@ -165,6 +168,30 @@ non-uniform lift. The lab therefore selects `UNIFORM FALLBACK`; an experimental
 model cannot consume the nine GPU slots until it passes the gate. See
 [docs/HYPOTHESIS_LAB.md](docs/HYPOTHESIS_LAB.md) and
 [docs/MODEL_ZOO.md](docs/MODEL_ZOO.md).
+
+## Generator Lab
+
+Generator Lab is a separate experiment limited to the registered public
+Bitcoin Puzzle challenge. It tests deterministic generator families against
+the public solved vectors, including SHA-256/HMAC variants, hash chains,
+MT19937, raw BIP32 paths, BIP39/BIP44 derivation, contextual phrases, dates,
+and timestamps. A candidate must match the newest control vector exactly,
+match five solved holdouts exactly, and then derive the registered target
+address before it can stop the campaign.
+
+The Windows launcher enables it automatically. Enable it manually or add an
+optional challenge-specific wordlist with:
+
+```bash
+puzzleforge generator-enable --cpu-percent 10
+puzzleforge generator-enable --cpu-percent 10 --wordlist ./seeds.txt
+```
+
+The default duty cycle uses 10% of one CPU core in the background and reserves
+0% of the GPU, so BitCrack keeps the GPU. Progress is atomic and resumes from
+`generator-lab.json`; the dashboard never exposes seed material or a recovered
+private key. Partial bit matches are diagnostic only and do not increase the
+reported success probability. See [docs/GENERATOR_LAB.md](docs/GENERATOR_LAB.md).
 
 Use `--benchmark-profile full` for a longer tune or `--chunk-seconds 600` to
 reduce checkpoint frequency. See [docs/LOCAL_FIRST.md](docs/LOCAL_FIRST.md).

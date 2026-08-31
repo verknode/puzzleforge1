@@ -447,6 +447,8 @@ def command_local_setup(args: argparse.Namespace) -> int:
         hypothesis_enabled=args.mode == "hypothesis",
         hypothesis_research_percent=10,
         hypothesis_search_percent=90,
+        generator_lab_enabled=True,
+        generator_lab_cpu_percent=10,
     )
     save_profile(profile_path, profile)
 
@@ -456,6 +458,7 @@ def command_local_setup(args: argparse.Namespace) -> int:
     print("Validation:    PASS (solved puzzle #8)")
     if profile.hypothesis_enabled:
         print("Hypothesis:    10% research / 90% GPU search")
+    print("Generator Lab: 10% of one CPU core / GPU unchanged")
     return 0
 
 
@@ -483,6 +486,38 @@ def command_hypothesis_enable(args: argparse.Namespace) -> int:
         search_percent=90,
     )
     print("Hypothesis Lab enabled: 10% research / 90% GPU search")
+    return 0
+
+
+def command_generator_enable(args: argparse.Namespace) -> int:
+    from .generator_lab import default_generator_lab
+    from .local import load_profile, save_profile
+
+    profile = load_profile(args.profile)
+    wordlist = (
+        profile.generator_lab_wordlist
+        if args.wordlist is None
+        else str(args.wordlist.expanduser().resolve())
+    )
+    updated = replace(
+        profile,
+        generator_lab_enabled=True,
+        generator_lab_cpu_percent=args.cpu_percent,
+        generator_lab_wordlist=wordlist,
+    )
+    lab = default_generator_lab(
+        updated.database,
+        target_puzzle=updated.puzzle,
+        wordlist=updated.generator_lab_wordlist,
+    )
+    lab.ensure_state()
+    save_profile(args.profile, updated)
+    print(
+        "Generator Lab enabled: "
+        f"{updated.generator_lab_cpu_percent}% of one CPU core; GPU search unchanged"
+    )
+    if updated.generator_lab_wordlist:
+        print(f"Wordlist: {updated.generator_lab_wordlist}")
     return 0
 
 
@@ -529,12 +564,13 @@ def _run_local_campaign(args: argparse.Namespace) -> int:
     )
 
     profile = load_profile(args.profile)
+    coordinator = Coordinator(Path(profile.database))
     if profile.hypothesis_enabled:
-        Coordinator(Path(profile.database)).enable_hypothesis(
+        coordinator.enable_hypothesis(
             research_percent=profile.hypothesis_research_percent,
             search_percent=profile.hypothesis_search_percent,
         )
-    campaign_status = Coordinator(Path(profile.database)).status()
+    campaign_status = coordinator.status()
     if campaign_status["state"] == "found":
         receipt = resume_pending_sweep(profile)
         if receipt is not None and receipt.broadcast:
@@ -550,6 +586,23 @@ def _run_local_campaign(args: argparse.Namespace) -> int:
         timeout_seconds=args.engine_timeout,
         thermal_guard=not args.no_thermal_guard,
     )
+    generator_worker = None
+    if profile.generator_lab_enabled:
+        from .generator_lab import GeneratorLabWorker, default_generator_lab
+
+        generator_lab = default_generator_lab(
+            profile.database,
+            target_puzzle=profile.puzzle,
+            wordlist=profile.generator_lab_wordlist,
+        )
+        existing_key = generator_lab.found_key()
+        if existing_key is not None:
+            return _finish_generator_match(profile, existing_key, coordinator)
+        generator_worker = GeneratorLabWorker(
+            generator_lab,
+            duty_percent=profile.generator_lab_cpu_percent,
+        )
+        generator_worker.start()
     completed = 0
     try:
         while args.max_chunks is None or completed < args.max_chunks:
@@ -562,6 +615,14 @@ def _run_local_campaign(args: argparse.Namespace) -> int:
             print(result.message, flush=True)
             if result.found:
                 return 0
+            if generator_worker is not None:
+                generator_key = generator_worker.found_key()
+                if generator_key is not None:
+                    return _finish_generator_match(
+                        profile,
+                        generator_key,
+                        coordinator,
+                    )
             if result.outcome == "complete":
                 completed += 1
                 continue
@@ -571,11 +632,30 @@ def _run_local_campaign(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         print("Local run stopped; unfinished work was returned to the queue.")
         return 130
+    finally:
+        if generator_worker is not None:
+            generator_worker.stop()
+    return 0
+
+
+def _finish_generator_match(profile, private_key: int, coordinator) -> int:
+    from .local import resume_pending_sweep
+
+    coordinator.record_verified_candidate(f"{private_key:064x}")
+    print("GENERATOR MATCH VERIFIED against the registered puzzle address.")
+    receipt = resume_pending_sweep(profile)
+    if receipt is not None and receipt.broadcast:
+        print(f"AUTO-SWEEP BROADCAST txid={receipt.txid}")
+        return 0
+    if receipt is not None:
+        print(f"AUTO-SWEEP PENDING: {receipt.detail}", file=sys.stderr)
+        return 1
     return 0
 
 
 def command_local_status(args: argparse.Namespace) -> int:
     from .coordinator import Coordinator
+    from .generator_lab import generator_dashboard_status
     from .local import load_profile
 
     profile = load_profile(args.profile)
@@ -598,6 +678,12 @@ def command_local_status(args: argparse.Namespace) -> int:
                 "research_percent": profile.hypothesis_research_percent,
                 "search_percent": profile.hypothesis_search_percent,
             },
+            "generator_lab": {
+                "enabled": profile.generator_lab_enabled,
+                "cpu_duty_percent": profile.generator_lab_cpu_percent,
+                "gpu_reserved_percent": 0,
+                "wordlist_configured": bool(profile.generator_lab_wordlist),
+            },
             "auto_sweep": {
                 "enabled": profile.auto_sweep_enabled,
                 "destination_address": profile.sweep_address,
@@ -606,6 +692,11 @@ def command_local_status(args: argparse.Namespace) -> int:
             },
         },
         "campaign": Coordinator(Path(profile.database)).status(),
+        "generator_lab": generator_dashboard_status(
+            profile.database,
+            enabled=profile.generator_lab_enabled,
+            duty_percent=profile.generator_lab_cpu_percent,
+        ),
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
@@ -1030,6 +1121,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile", type=Path, default=Path(".puzzleforge/local/profile.json")
     )
     hypothesis_enable_parser.set_defaults(handler=command_hypothesis_enable)
+
+    generator_enable_parser = subparsers.add_parser(
+        "generator-enable",
+        help="enable challenge-scoped generator research beside the GPU scan",
+    )
+    generator_enable_parser.add_argument(
+        "--profile", type=Path, default=Path(".puzzleforge/local/profile.json")
+    )
+    generator_enable_parser.add_argument(
+        "--cpu-percent",
+        type=positive_integer,
+        default=10,
+        help="duty cycle of one CPU core (1-50; GPU remains dedicated to BitCrack)",
+    )
+    generator_enable_parser.add_argument(
+        "--wordlist",
+        type=Path,
+        help="optional challenge-specific seed phrase list",
+    )
+    generator_enable_parser.set_defaults(handler=command_generator_enable)
 
     local_sweep_parser = subparsers.add_parser(
         "local-sweep-configure",

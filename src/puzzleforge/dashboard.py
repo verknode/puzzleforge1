@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .coordinator import Coordinator
+from .generator_lab import generator_dashboard_status
 from .local import LocalProfile, load_profile
 from .sweep import load_sweep_record
 from .telemetry import TelemetryCache
@@ -68,6 +69,12 @@ def dashboard_payload(
                 "research_percent": profile.hypothesis_research_percent,
                 "search_percent": profile.hypothesis_search_percent,
             },
+            "generator_lab": {
+                "enabled": profile.generator_lab_enabled,
+                "cpu_duty_percent": profile.generator_lab_cpu_percent,
+                "gpu_reserved_percent": 0,
+                "wordlist_configured": bool(profile.generator_lab_wordlist),
+            },
             "auto_sweep": {
                 "enabled": profile.auto_sweep_enabled,
                 "destination_address": profile.sweep_address,
@@ -76,6 +83,11 @@ def dashboard_payload(
             },
         },
         "campaign": campaign,
+        "generator_lab": generator_dashboard_status(
+            profile.database,
+            enabled=profile.generator_lab_enabled,
+            duty_percent=profile.generator_lab_cpu_percent,
+        ),
         "sweep": sweep,
         "telemetry": telemetry,
         "derived": {
@@ -175,14 +187,128 @@ main{width:min(1120px,100%);margin:auto;padding:28px 18px 48px}header{display:fl
 <article class="card wide"><div class="label">Exact unique coverage</div><div class="value" id="coverage">—</div><div class="bar"><div class="fill" id="coverageBar"></div></div><div class="meta" id="checked">— checked</div></article>
 <article class="card wide"><div class="label">Campaign</div><div class="row"><span>Puzzle</span><b id="puzzle">—</b></div><div class="row"><span>Mode</span><b id="mode">—</b></div><div class="row"><span>Completed chunks</span><b id="chunks">—</b></div><div class="row"><span>Failures / retries</span><b id="failures">—</b></div></article>
 <article class="card full"><div class="label">Hypothesis Lab / Model Zoo</div><div class="row"><span>Cycle</span><b id="labCycle">—</b></div><div class="row"><span>Research / GPU search</span><b id="labRatio">—</b></div><div class="row"><span>Models / eligible / shadow</span><b id="labCounts">—</b></div><div class="row"><span>Best eligible candidate</span><b id="labCandidate">—</b></div><div class="row"><span>Selected model</span><b id="labModel">—</b></div><div class="row"><span>Empirical evidence gate</span><b id="labEvidence">—</b></div></article>
+<article class="card full"><div class="label">Generator Lab / public-puzzle seed research</div><div class="row"><span>Status</span><b id="genStatus">—</b></div><div class="row"><span>CPU duty / GPU reserved</span><b id="genDuty">—</b></div><div class="row"><span>Generator candidates / completed seeds</span><b id="genCounts">—</b></div><div class="row"><span>Current source</span><b id="genSource">—</b></div><div class="row"><span>Current scheme</span><b id="genScheme">—</b></div><div class="row"><span>Best control match (diagnostic only)</span><b id="genBits">—</b></div><div class="row"><span>Exact validated generators</span><b id="genValidated">—</b></div></article>
 <article class="card full"><div class="label">Local profile</div><div class="row"><span>24h coverage at benchmark speed</span><b id="day">—</b></div><div class="row"><span>Durable chunk target</span><b id="chunkTarget">—</b></div><div class="row"><span>Configured thermal policy</span><b id="thermalGuard">—</b></div><div class="row"><span>GPU memory</span><b id="memory">—</b></div><div class="row"><span>Last update</span><b id="updated">—</b></div><div class="meta error" id="error"></div></article>
 <article class="card full"><div class="label">Verified-match auto-sweep</div><div class="row"><span>Status</span><b id="sweepState">—</b></div><div class="row"><span>Destination</span><b id="sweepAddress">—</b></div><div class="row"><span>Transaction</span><b id="sweepTxid">—</b></div><div class="row"><span>Amount / fee</span><b id="sweepAmount">—</b></div></article>
 </section></main>
 <script>
-const $=id=>document.getElementById(id),num=v=>Number(v||0),fmt=n=>new Intl.NumberFormat('en',{maximumFractionDigits:2,notation:'compact'}).format(n),pct=v=>{const n=num(v);return n===0?'0%':n<.000001?n.toExponential(3)+'%':n.toFixed(Math.min(8,Math.max(3,-Math.floor(Math.log10(n))+2)))+'%'};
-async function refresh(){try{const response=await fetch('/api/status',{cache:'no-store'});const d=await response.json();if(!response.ok)throw Error(d.error||response.status);const c=d.campaign,l=d.local,t=d.telemetry||{},x=d.derived;
-$('state').textContent=c.state;$('dot').style.background=c.state==='running'?'var(--good)':c.state==='found'?'var(--hot)':'var(--muted)';$('speed').textContent=fmt(l.measured_rate_keys_per_second);$('coverage').textContent=pct(x.coverage_percent);$('coverageBar').style.width=Math.min(100,num(x.coverage_percent))+'%';$('checked').textContent=fmt(num(c.checked_keys))+' / '+fmt(num(c.total_keys))+' checked';$('puzzle').textContent='#'+c.puzzle;$('mode').textContent=c.planner_mode.toUpperCase();$('chunks').textContent=c.completed_chunks;$('failures').textContent=c.worker_failures+' / '+c.retry_queue;$('day').textContent=pct(x.benchmark_day_percent);$('chunkTarget').textContent=l.target_chunk_seconds+' sec / '+fmt(l.chunk_size);$('thermalGuard').textContent=l.thermal_guard.maximum_c+'°C → '+l.thermal_guard.resume_c+'°C';$('updated').textContent=new Date(c.updated_at).toLocaleString();const h=c.hypothesis_lab||{},report=h.report||{},score=(report.scores||[]).find(v=>v.name===report.selected_model),w=d.sweep||{};$('labCycle').textContent=h.enabled?h.cycle:'OFF';$('labRatio').textContent=h.enabled?h.research_percent+'% / '+h.search_percent+'%':'—';$('labCounts').textContent=report.model_count!==undefined?report.model_count+' / '+report.eligible_model_count+' / '+report.shadow_model_count:'pending';$('labCandidate').textContent=report.best_candidate||'pending';$('labModel').textContent=report.selected_model||'pending';$('labEvidence').textContent=report.selected_model?(report.uniform_fallback?'UNIFORM FALLBACK / 0 validated':report.selected_model_validated?'VALIDATED / '+report.validated_model_count:('experimental / '+(score?Number(score.geometric_lift).toFixed(3)+'× holdout':'no score'))):'pending';$('sweepState').textContent=(w.state||'disabled').toUpperCase();$('sweepAddress').textContent=w.destination_address||'not configured';$('sweepTxid').textContent=w.txid||'—';$('sweepAmount').textContent=w.output_value_sats?fmt(w.output_value_sats)+' sats / '+fmt(w.fee_sats)+' sats':'—';
-if(t.available){$('gpuName').textContent='LOCAL GPU / '+t.name;$('load').textContent=Math.round(num(t.utilization_percent));$('loadBar').style.width=Math.min(100,num(t.utilization_percent))+'%';$('temp').textContent=Math.round(num(t.temperature_c));$('power').textContent=num(t.power_w).toFixed(0);$('powerLimit').textContent='limit '+num(t.power_limit_w).toFixed(0)+' W';$('clock').textContent=fmt(num(t.sm_clock_mhz))+' MHz';$('memory').textContent=fmt(num(t.memory_used_mib))+' / '+fmt(num(t.memory_total_mib))+' MiB';$('error').textContent=''}else{$('error').textContent=t.error||'GPU telemetry unavailable'}
-}catch(e){$('state').textContent='OFFLINE';$('dot').style.background='var(--bad)';$('error').textContent=e.message}}
-refresh();setInterval(refresh,3000);
+const $ = id => document.getElementById(id);
+const num = value => Number(value || 0);
+const fmt = value => new Intl.NumberFormat('en', {
+  maximumFractionDigits: 2,
+  notation: 'compact'
+}).format(value);
+const pct = value => {
+  const number = num(value);
+  if (number === 0) return '0%';
+  if (number < .000001) return number.toExponential(3) + '%';
+  return number.toFixed(
+    Math.min(8, Math.max(3, -Math.floor(Math.log10(number)) + 2))
+  ) + '%';
+};
+
+async function refresh() {
+  try {
+    const response = await fetch('/api/status', {cache: 'no-store'});
+    const data = await response.json();
+    if (!response.ok) throw Error(data.error || response.status);
+
+    const campaign = data.campaign;
+    const local = data.local;
+    const telemetry = data.telemetry || {};
+    const derived = data.derived;
+    const hypothesis = campaign.hypothesis_lab || {};
+    const report = hypothesis.report || {};
+    const score = (report.scores || []).find(
+      value => value.name === report.selected_model
+    );
+    const generator = data.generator_lab || {};
+    const sweep = data.sweep || {};
+
+    $('state').textContent = campaign.state;
+    $('dot').style.background = campaign.state === 'running'
+      ? 'var(--good)'
+      : campaign.state === 'found' ? 'var(--hot)' : 'var(--muted)';
+    $('speed').textContent = fmt(local.measured_rate_keys_per_second);
+    $('coverage').textContent = pct(derived.coverage_percent);
+    $('coverageBar').style.width = Math.min(100, num(derived.coverage_percent)) + '%';
+    $('checked').textContent = fmt(num(campaign.checked_keys)) + ' / ' +
+      fmt(num(campaign.total_keys)) + ' checked';
+    $('puzzle').textContent = '#' + campaign.puzzle;
+    $('mode').textContent = campaign.planner_mode.toUpperCase();
+    $('chunks').textContent = campaign.completed_chunks;
+    $('failures').textContent = campaign.worker_failures + ' / ' + campaign.retry_queue;
+    $('day').textContent = pct(derived.benchmark_day_percent);
+    $('chunkTarget').textContent = local.target_chunk_seconds + ' sec / ' +
+      fmt(local.chunk_size);
+    $('thermalGuard').textContent = local.thermal_guard.maximum_c + '°C → ' +
+      local.thermal_guard.resume_c + '°C';
+    $('updated').textContent = new Date(campaign.updated_at).toLocaleString();
+
+    $('labCycle').textContent = hypothesis.enabled ? hypothesis.cycle : 'OFF';
+    $('labRatio').textContent = hypothesis.enabled
+      ? hypothesis.research_percent + '% / ' + hypothesis.search_percent + '%'
+      : '—';
+    $('labCounts').textContent = report.model_count !== undefined
+      ? report.model_count + ' / ' + report.eligible_model_count + ' / ' +
+        report.shadow_model_count
+      : 'pending';
+    $('labCandidate').textContent = report.best_candidate || 'pending';
+    $('labModel').textContent = report.selected_model || 'pending';
+    $('labEvidence').textContent = report.selected_model
+      ? report.uniform_fallback
+        ? 'UNIFORM FALLBACK / 0 validated'
+        : report.selected_model_validated
+          ? 'VALIDATED / ' + report.validated_model_count
+          : 'experimental / ' + (score
+            ? Number(score.geometric_lift).toFixed(3) + '× holdout'
+            : 'no score')
+      : 'pending';
+
+    $('genStatus').textContent = (generator.status || 'disabled').toUpperCase();
+    $('genDuty').textContent = generator.enabled
+      ? generator.cpu_duty_percent + '% / ' + generator.gpu_reserved_percent + '%'
+      : 'OFF';
+    $('genCounts').textContent = fmt(num(generator.checked_candidates)) + ' / ' +
+      fmt(num(generator.completed_seed_candidates));
+    $('genSource').textContent = generator.current_source || 'pending';
+    $('genScheme').textContent = generator.current_scheme || 'pending';
+    $('genBits').textContent = num(generator.best_low_bits_total)
+      ? generator.best_low_bits + ' / ' + generator.best_low_bits_total + ' bits'
+      : 'pending';
+    $('genValidated').textContent = generator.validated_known_generators || 0;
+
+    $('sweepState').textContent = (sweep.state || 'disabled').toUpperCase();
+    $('sweepAddress').textContent = sweep.destination_address || 'not configured';
+    $('sweepTxid').textContent = sweep.txid || '—';
+    $('sweepAmount').textContent = sweep.output_value_sats
+      ? fmt(sweep.output_value_sats) + ' sats / ' + fmt(sweep.fee_sats) + ' sats'
+      : '—';
+
+    if (telemetry.available) {
+      $('gpuName').textContent = 'LOCAL GPU / ' + telemetry.name;
+      $('load').textContent = Math.round(num(telemetry.utilization_percent));
+      $('loadBar').style.width = Math.min(100, num(telemetry.utilization_percent)) + '%';
+      $('temp').textContent = Math.round(num(telemetry.temperature_c));
+      $('power').textContent = num(telemetry.power_w).toFixed(0);
+      $('powerLimit').textContent = 'limit ' +
+        num(telemetry.power_limit_w).toFixed(0) + ' W';
+      $('clock').textContent = fmt(num(telemetry.sm_clock_mhz)) + ' MHz';
+      $('memory').textContent = fmt(num(telemetry.memory_used_mib)) + ' / ' +
+        fmt(num(telemetry.memory_total_mib)) + ' MiB';
+      $('error').textContent = generator.status === 'error'
+        ? generator.last_error || 'Generator Lab error'
+        : '';
+    } else {
+      $('error').textContent = telemetry.error || 'GPU telemetry unavailable';
+    }
+  } catch (error) {
+    $('state').textContent = 'OFFLINE';
+    $('dot').style.background = 'var(--bad)';
+    $('error').textContent = error.message;
+  }
+}
+
+refresh();
+setInterval(refresh, 3000);
 </script></body></html>""".encode("utf-8")

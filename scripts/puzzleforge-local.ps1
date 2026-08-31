@@ -43,4 +43,7 @@ if (-not (Test-Path $Profile)) {
 & $VenvPython -m puzzleforge hypothesis-enable
 if ($LASTEXITCODE -ne 0) { throw "Could not enable Hypothesis Lab." }
 
+& $VenvPython -m puzzleforge generator-enable --cpu-percent 10
+if ($LASTEXITCODE -ne 0) { throw "Could not enable Generator Lab." }
+
 & $VenvPython -m puzzleforge local-app

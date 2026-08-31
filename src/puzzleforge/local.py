@@ -50,6 +50,9 @@ class LocalProfile:
     hypothesis_enabled: bool = False
     hypothesis_research_percent: int = 10
     hypothesis_search_percent: int = 90
+    generator_lab_enabled: bool = False
+    generator_lab_cpu_percent: int = 10
+    generator_lab_wordlist: str = ""
     auto_sweep_enabled: bool = False
     sweep_address: str = ""
     sweep_fee_floor_sat_vb: int = 25
@@ -105,6 +108,15 @@ class LocalProfile:
             raise ValueError(
                 "Hypothesis Lab requires a target after the training observations"
             )
+        if not isinstance(self.generator_lab_enabled, bool):
+            raise ValueError("local profile Generator Lab flag is invalid")
+        if (
+            isinstance(self.generator_lab_cpu_percent, bool)
+            or not 1 <= self.generator_lab_cpu_percent <= 50
+        ):
+            raise ValueError("local profile Generator Lab CPU duty is invalid")
+        if len(self.generator_lab_wordlist.encode("utf-8")) > 32_768:
+            raise ValueError("local profile Generator Lab wordlist path is too long")
         if not isinstance(self.auto_sweep_enabled, bool):
             raise ValueError("local profile auto-sweep flag is invalid")
         if self.sweep_address:
@@ -173,6 +185,15 @@ class LocalProfile:
                 ),
                 hypothesis_search_percent=int(
                     payload.get("hypothesis_search_percent", 90)
+                ),
+                generator_lab_enabled=_optional_bool(
+                    payload.get("generator_lab_enabled", False)
+                ),
+                generator_lab_cpu_percent=int(
+                    payload.get("generator_lab_cpu_percent", 10)
+                ),
+                generator_lab_wordlist=str(
+                    payload.get("generator_lab_wordlist", "")
                 ),
                 auto_sweep_enabled=_optional_bool(
                     payload.get("auto_sweep_enabled", False)
