@@ -6,7 +6,7 @@ from decimal import Decimal, localcontext
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from .coordinator import Coordinator
 from .generator_lab import generator_dashboard_status
@@ -110,7 +110,8 @@ def create_dashboard_server(
         server_version = "PuzzleForgeDashboard/0.1"
 
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
-            path = urlsplit(self.path).path
+            request = urlsplit(self.path)
+            path = request.path
             if path == "/":
                 self._send(HTTPStatus.OK, DASHBOARD_HTML, "text/html; charset=utf-8")
                 return
@@ -122,6 +123,18 @@ def create_dashboard_server(
                 except (OSError, RuntimeError, ValueError) as exc:
                     body = json.dumps({"error": str(exc)}).encode("utf-8")
                     self._send(HTTPStatus.INTERNAL_SERVER_ERROR, body, "application/json")
+                return
+            if path == "/api/range-map":
+                try:
+                    raw_bins = parse_qs(request.query).get("bins", ["4096"])[0]
+                    payload = Coordinator(Path(profile.database)).range_map(
+                        bins=int(raw_bins)
+                    )
+                    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+                    self._send(HTTPStatus.OK, body, "application/json")
+                except (OSError, RuntimeError, ValueError) as exc:
+                    body = json.dumps({"error": str(exc)}).encode("utf-8")
+                    self._send(HTTPStatus.BAD_REQUEST, body, "application/json")
                 return
             if path == "/healthz":
                 self._send(HTTPStatus.OK, b"ok\n", "text/plain; charset=utf-8")
@@ -173,7 +186,8 @@ DASHBOARD_HTML = """<!doctype html>
 *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0,#182026 0,transparent 34%),var(--bg);color:var(--text);font:14px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace;min-height:100vh}
 main{width:min(1120px,100%);margin:auto;padding:28px 18px 48px}header{display:flex;justify-content:space-between;gap:18px;align-items:end;margin-bottom:24px}.brand{font-size:clamp(25px,5vw,46px);font-weight:900;letter-spacing:-.06em}.brand b{color:var(--hot)}.sub{color:var(--muted);font-size:12px}.state{display:flex;align-items:center;gap:8px;text-transform:uppercase;font-weight:800}.dot{width:9px;height:9px;border-radius:50%;background:var(--good);box-shadow:0 0 15px var(--good)}
 .grid{display:grid;grid-template-columns:repeat(12,1fr);gap:12px}.card{grid-column:span 3;background:linear-gradient(145deg,rgba(19,24,29,.95),rgba(13,16,19,.96));border:1px solid var(--line);border-radius:16px;padding:17px;min-height:126px}.wide{grid-column:span 6}.full{grid-column:1/-1}.label{color:var(--muted);font-size:11px;letter-spacing:.14em;text-transform:uppercase}.value{font-size:clamp(25px,4vw,40px);font-weight:850;letter-spacing:-.05em;margin-top:12px}.unit{font-size:12px;color:var(--muted);margin-left:5px}.meta{color:var(--muted);margin-top:8px}.bar{height:9px;background:#07090a;border:1px solid var(--line);border-radius:20px;overflow:hidden;margin-top:18px}.fill{height:100%;width:0;background:linear-gradient(90deg,var(--hot),#ffe08a);box-shadow:0 0 15px #ffb00088;transition:width .5s}.row{display:flex;justify-content:space-between;gap:15px;padding:8px 0;border-bottom:1px solid #20272c}.row:last-child{border:0}.error{color:var(--bad)}
-@media(max-width:760px){main{padding:20px 12px 40px}header{align-items:start}.card{grid-column:span 6}.wide{grid-column:1/-1}.value{font-size:28px}}
+.map-head{display:flex;align-items:center;justify-content:space-between;gap:16px}.map-legend{display:flex;flex-wrap:wrap;gap:12px;color:var(--muted);font-size:11px}.map-legend span{display:flex;align-items:center;gap:5px}.swatch{width:8px;height:8px;border-radius:2px;background:#111820;border:1px solid #34414a}.swatch.done{background:var(--good);border-color:var(--good)}.swatch.active{background:var(--hot);border-color:var(--hot)}.swatch.retry{background:var(--bad);border-color:var(--bad)}.range-map{display:block;width:100%;height:260px;margin-top:14px;border:1px solid var(--line);border-radius:9px;background:#090c0f;cursor:crosshair;image-rendering:pixelated}.map-detail{min-height:21px;color:var(--muted);margin-top:9px;overflow-wrap:anywhere}.map-note{font-size:11px;color:#65727b;margin-top:4px}
+@media(max-width:760px){main{padding:20px 12px 40px}header{align-items:start}.card{grid-column:span 6}.wide{grid-column:1/-1}.value{font-size:28px}.map-head{align-items:start;flex-direction:column;gap:8px}.range-map{height:320px}}
 @media(max-width:420px){.card{grid-column:1/-1;min-height:112px}.brand{font-size:29px}}
 </style>
 </head>
@@ -186,6 +200,7 @@ main{width:min(1120px,100%);margin:auto;padding:28px 18px 48px}header{display:fl
 <article class="card"><div class="label">Power</div><div class="value"><span id="power">—</span><span class="unit">W</span></div><div class="meta" id="powerLimit">limit —</div></article>
 <article class="card wide"><div class="label">Exact unique coverage</div><div class="value" id="coverage">—</div><div class="bar"><div class="fill" id="coverageBar"></div></div><div class="meta" id="checked">— checked</div></article>
 <article class="card wide"><div class="label">Campaign</div><div class="row"><span>Puzzle</span><b id="puzzle">—</b></div><div class="row"><span>Mode</span><b id="mode">—</b></div><div class="row"><span>Completed chunks</span><b id="chunks">—</b></div><div class="row"><span>Failures / retries</span><b id="failures">—</b></div></article>
+<article class="card full"><div class="map-head"><div class="label">Keyspace map / low → high</div><div class="map-legend"><span><i class="swatch done"></i>checked</span><span><i class="swatch active"></i>active</span><span><i class="swatch retry"></i>retry</span><span><i class="swatch"></i>untouched</span></div></div><canvas class="range-map" id="rangeMap"></canvas><div class="map-detail" id="rangeMapDetail">Loading range positions…</div><div class="map-note">A lit cell contains one or more chunks; it does not mean the entire coarse cell was checked. Tap a cell for its exact key range.</div></article>
 <article class="card full"><div class="label">Hypothesis Lab / Model Zoo</div><div class="row"><span>Cycle</span><b id="labCycle">—</b></div><div class="row"><span>Research / GPU search</span><b id="labRatio">—</b></div><div class="row"><span>Models / eligible / shadow</span><b id="labCounts">—</b></div><div class="row"><span>Best eligible candidate</span><b id="labCandidate">—</b></div><div class="row"><span>Selected model</span><b id="labModel">—</b></div><div class="row"><span>Empirical evidence gate</span><b id="labEvidence">—</b></div></article>
 <article class="card full"><div class="label">Generator Lab / public-puzzle seed research</div><div class="row"><span>Status</span><b id="genStatus">—</b></div><div class="row"><span>CPU duty / GPU reserved</span><b id="genDuty">—</b></div><div class="row"><span>Generator candidates / completed seeds</span><b id="genCounts">—</b></div><div class="row"><span>Current source</span><b id="genSource">—</b></div><div class="row"><span>Current scheme</span><b id="genScheme">—</b></div><div class="row"><span>Best control match (diagnostic only)</span><b id="genBits">—</b></div><div class="row"><span>Exact validated generators</span><b id="genValidated">—</b></div></article>
 <article class="card full"><div class="label">Local profile</div><div class="row"><span>24h coverage at benchmark speed</span><b id="day">—</b></div><div class="row"><span>Durable chunk target</span><b id="chunkTarget">—</b></div><div class="row"><span>Configured thermal policy</span><b id="thermalGuard">—</b></div><div class="row"><span>GPU memory</span><b id="memory">—</b></div><div class="row"><span>Last update</span><b id="updated">—</b></div><div class="meta error" id="error"></div></article>
@@ -206,6 +221,97 @@ const pct = value => {
     Math.min(8, Math.max(3, -Math.floor(Math.log10(number)) + 2))
   ) + '%';
 };
+let rangeMapData = null;
+
+const sparseCounts = values => new Map((values || []).map(value => [value[0], value[1]]));
+const hex = value => value.toString(16).padStart(18, '0');
+
+function renderRangeMap() {
+  if (!rangeMapData) return;
+  const canvas = $('rangeMap');
+  const bounds = canvas.getBoundingClientRect();
+  const width = Math.max(280, Math.floor(bounds.width));
+  const columns = width < 620 ? 64 : 128;
+  const rows = Math.ceil(rangeMapData.bins / columns);
+  const cell = width / columns;
+  const height = Math.max(1, rows * cell);
+  const ratio = Math.max(1, window.devicePixelRatio || 1);
+  canvas.width = Math.round(width * ratio);
+  canvas.height = Math.round(height * ratio);
+  canvas.style.height = height + 'px';
+  const context = canvas.getContext('2d');
+  context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  context.fillStyle = '#090c0f';
+  context.fillRect(0, 0, width, height);
+
+  const completed = sparseCounts(rangeMapData.states.completed);
+  const active = sparseCounts(rangeMapData.states.active);
+  const retry = sparseCounts(rangeMapData.states.retry);
+  const maximum = Math.max(1, ...completed.values());
+  const gap = cell >= 6 ? 1 : .55;
+  for (let index = 0; index < rangeMapData.bins; index += 1) {
+    const x = (index % columns) * cell;
+    const y = Math.floor(index / columns) * cell;
+    const doneCount = completed.get(index) || 0;
+    if (active.has(index)) {
+      context.fillStyle = '#ffb000';
+    } else if (retry.has(index)) {
+      context.fillStyle = '#ff5d64';
+    } else if (doneCount) {
+      const alpha = .45 + .55 * Math.log1p(doneCount) / Math.log1p(maximum);
+      context.fillStyle = `rgba(69,224,138,${alpha})`;
+    } else {
+      context.fillStyle = '#111820';
+    }
+    context.fillRect(x + gap / 2, y + gap / 2, cell - gap, cell - gap);
+  }
+  canvas._rangeLayout = {columns, rows, cell, completed, active, retry};
+
+  const done = (rangeMapData.states.completed || []).reduce((sum, item) => sum + item[1], 0);
+  const touched = completed.size;
+  $('rangeMapDetail').textContent = `${done.toLocaleString()} completed chunks across ` +
+    `${touched.toLocaleString()} of ${rangeMapData.bins.toLocaleString()} display cells`;
+}
+
+function showRangeMapCell(event) {
+  if (!rangeMapData) return;
+  const canvas = $('rangeMap');
+  const layout = canvas._rangeLayout;
+  if (!layout) return;
+  const bounds = canvas.getBoundingClientRect();
+  const column = Math.floor((event.clientX - bounds.left) / layout.cell);
+  const row = Math.floor((event.clientY - bounds.top) / layout.cell);
+  const index = row * layout.columns + column;
+  if (index < 0 || index >= rangeMapData.bins) return;
+
+  const totalChunks = BigInt(rangeMapData.total_chunks);
+  const span = BigInt(rangeMapData.bucket_span_chunks);
+  const chunkSize = BigInt(rangeMapData.chunk_size);
+  const puzzleStart = BigInt('0x' + rangeMapData.start_hex);
+  const puzzleEnd = BigInt('0x' + rangeMapData.end_hex);
+  const firstChunk = BigInt(index) * span;
+  const afterLast = firstChunk + span < totalChunks ? firstChunk + span : totalChunks;
+  const keyStart = puzzleStart + firstChunk * chunkSize;
+  const calculatedEnd = puzzleStart + afterLast * chunkSize - 1n;
+  const keyEnd = calculatedEnd < puzzleEnd ? calculatedEnd : puzzleEnd;
+  const done = layout.completed.get(index) || 0;
+  const active = layout.active.get(index) || 0;
+  const retry = layout.retry.get(index) || 0;
+  $('rangeMapDetail').textContent = `0x${hex(keyStart)} – 0x${hex(keyEnd)} · ` +
+    `checked ${done} · active ${active} · retry ${retry}`;
+}
+
+async function refreshRangeMap() {
+  try {
+    const response = await fetch('/api/range-map?bins=4096', {cache: 'no-store'});
+    const data = await response.json();
+    if (!response.ok) throw Error(data.error || response.status);
+    rangeMapData = data;
+    renderRangeMap();
+  } catch (error) {
+    $('rangeMapDetail').textContent = 'Range map unavailable: ' + error.message;
+  }
+}
 
 async function refresh() {
   try {
@@ -310,5 +416,9 @@ async function refresh() {
 }
 
 refresh();
+refreshRangeMap();
 setInterval(refresh, 3000);
+$('rangeMap').addEventListener('click', showRangeMapCell);
+window.addEventListener('resize', renderRangeMap);
+setInterval(refreshRangeMap, 15000);
 </script></body></html>""".encode("utf-8")

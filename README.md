@@ -19,7 +19,8 @@ of a key independently verified against a registered public-puzzle address.
 - local-first GPU profile with validation, auto-tuning, adaptive durable chunks,
   and one-command resume;
 - lightweight mobile-friendly dashboard with cached NVIDIA load, temperature,
-  power, memory, speed, and exact coverage telemetry;
+  power, memory, speed, exact coverage telemetry, and a tappable coarse
+  keyspace map backed by the durable chunk database;
 - temperature guard with process abort, cooldown hysteresis, and same-chunk retry;
 - combined local app command and Windows double-click launcher;
 - Hypothesis Lab with a 126-model fingerprinted zoo, verified solved vectors,

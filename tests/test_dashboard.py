@@ -94,7 +94,41 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(payload["generator_lab"]["gpu_reserved_percent"], 0)
         self.assertIn(b"Model Zoo", DASHBOARD_HTML)
         self.assertIn(b"Generator Lab", DASHBOARD_HTML)
+        self.assertIn(b"Keyspace map", DASHBOARD_HTML)
+        self.assertIn(b"/api/range-map?bins=4096", DASHBOARD_HTML)
         self.assertIn(b"PUZZLE", DASHBOARD_HTML)
+
+    def test_range_map_reports_sparse_chunk_locations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "campaign.sqlite3"
+            coordinator = Coordinator.initialize(
+                database,
+                puzzle_number=8,
+                chunk_size=16,
+                seed="range-map-tests",
+            )
+            for worker in ("map-one", "map-two"):
+                lease = coordinator.lease(worker, lease_seconds=60)
+                self.assertIsNotNone(lease)
+                coordinator.complete(
+                    lease.token,
+                    lease.worker,
+                    checked=lease.keys,
+                    elapsed_seconds=1.0,
+                    rate_keys_per_second=lease.keys,
+                )
+            active = coordinator.lease("map-active", lease_seconds=60)
+            self.assertIsNotNone(active)
+            payload = coordinator.range_map(bins=64)
+
+        self.assertEqual(payload["puzzle"], 8)
+        self.assertEqual(payload["bins"], 8)
+        self.assertEqual(payload["bucket_span_chunks"], "1")
+        self.assertEqual(
+            sum(count for _, count in payload["states"]["completed"]), 2
+        )
+        self.assertEqual(sum(count for _, count in payload["states"]["active"]), 1)
+        self.assertEqual(payload["states"]["retry"], [])
 
 
 if __name__ == "__main__":

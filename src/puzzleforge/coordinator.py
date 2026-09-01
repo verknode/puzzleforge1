@@ -1037,6 +1037,68 @@ class Coordinator:
                     connection.rollback()
                 raise
 
+    def range_map(self, *, bins: int = 4096) -> dict[str, Any]:
+        """Return a sparse, coarse map of allocated chunks across the keyspace.
+
+        A map cell represents a contiguous group of chunk ids.  Sparse state
+        lists keep the dashboard response small while preserving exact work
+        locations.  A marked cell means that it contains one or more chunks in
+        that state; it does not claim that the whole cell has been searched.
+        """
+
+        if (
+            isinstance(bins, bool)
+            or not isinstance(bins, int)
+            or not 64 <= bins <= 16_384
+        ):
+            raise ValueError("range-map bins must be an integer from 64 to 16384")
+
+        with self._connect() as connection:
+            campaign = self._load_campaign(connection)
+            total_chunks = int(campaign["total_chunks"])
+            actual_bins = min(bins, total_chunks)
+            bucket_span = (total_chunks + actual_bins - 1) // actual_bins
+            rows = connection.execute(
+                """
+                SELECT CAST(chunk_id / ? AS INTEGER) AS bucket,
+                       state,
+                       COUNT(*) AS count
+                  FROM work
+                 GROUP BY bucket, state
+                 ORDER BY bucket, state
+                """,
+                (bucket_span,),
+            ).fetchall()
+
+        states: dict[str, list[list[int]]] = {
+            "completed": [],
+            "active": [],
+            "retry": [],
+        }
+        state_names = {
+            "completed": "completed",
+            "leased": "active",
+            "available": "retry",
+        }
+        for row in rows:
+            states[state_names[row["state"]]].append(
+                [int(row["bucket"]), int(row["count"])]
+            )
+
+        return {
+            "schema": 1,
+            "puzzle": int(campaign["puzzle"]),
+            "start_hex": str(campaign["start_hex"]),
+            "end_hex": str(campaign["end_hex"]),
+            "chunk_size": str(campaign["chunk_size"]),
+            "total_chunks": str(total_chunks),
+            "bins": actual_bins,
+            "bucket_span_chunks": str(bucket_span),
+            "checked_keys": str(campaign["checked_keys"]),
+            "states": states,
+            "updated_at": str(campaign["updated_at"]),
+        }
+
     def status(self, *, now_epoch: float | None = None) -> dict[str, Any]:
         now_epoch = time.time() if now_epoch is None else float(now_epoch)
         now_text = utc_now()
