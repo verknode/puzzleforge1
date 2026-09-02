@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .crypto import p2pkh_address_from_private_key
-from .mosaic import MosaicPlanner
+from .mosaic import COLD_LANES, LANE_PRESETS, MosaicPlanner, preset_name
 from .partition import ChunkPlan, KeyChunk
 from .registry import get_puzzle
 
@@ -23,6 +23,48 @@ from .registry import get_puzzle
 SCHEMA_VERSION = 3
 SQLITE_MAX_INTEGER = (1 << 63) - 1
 _WORKER_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}\Z")
+
+
+def _carried_cursors(
+    campaign: sqlite3.Row, fresh: dict[str, int]
+) -> dict[str, int]:
+    """Keep the cursor of any lane the previous lane set already advanced.
+
+    A carried cursor is only an optimization: the duplicate filter already
+    guarantees correctness. Without it a lane would re-walk every rank it has
+    already proposed before reaching unseen ground.
+    """
+
+    if campaign["planner_mode"] != "mosaic" or not campaign["planner_state"]:
+        return fresh
+    try:
+        previous = json.loads(campaign["planner_state"]).get("cursors")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return fresh
+    if not isinstance(previous, dict):
+        return fresh
+    carried = dict(fresh)
+    for name in carried:
+        value = previous.get(name)
+        if (
+            not isinstance(value, bool)
+            and isinstance(value, int)
+            and 0 <= value <= campaign["total_chunks"]
+        ):
+            carried[name] = value
+    return carried
+
+
+def _reported_planner_mode(campaign: sqlite3.Row) -> str:
+    """Name the lane preset a MOSAIC campaign was created with."""
+
+    if campaign["planner_mode"] != "mosaic":
+        return campaign["planner_mode"]
+    try:
+        lanes = MosaicPlanner.lanes_from_state(json.loads(campaign["planner_state"]))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return "mosaic"
+    return preset_name(lanes)
 
 
 class CoordinatorError(RuntimeError):
@@ -157,11 +199,19 @@ class Coordinator:
             raise ValueError("chunk_size must fit a positive SQLite integer")
         if not seed or len(seed.encode("utf-8")) > 512:
             raise ValueError("seed must contain 1-512 UTF-8 bytes")
-        if planner_mode not in {"affine", "mosaic", "hypothesis"}:
-            raise ValueError("planner_mode must be affine, mosaic, or hypothesis")
+        if planner_mode not in {"affine", "mosaic", "cold", "hypothesis"}:
+            raise ValueError(
+                "planner_mode must be affine, mosaic, cold, or hypothesis"
+            )
 
         hypothesis_enabled = planner_mode == "hypothesis"
-        stored_planner_mode = "affine" if hypothesis_enabled else planner_mode
+        lanes = LANE_PRESETS.get(planner_mode)
+        if hypothesis_enabled:
+            stored_planner_mode = "affine"
+        elif lanes is not None:
+            stored_planner_mode = "mosaic"
+        else:
+            stored_planner_mode = planner_mode
         if hypothesis_enabled and puzzle_number < 18:
             raise ValueError(
                 "Hypothesis Lab requires a target after the training observations"
@@ -176,7 +226,12 @@ class Coordinator:
             )
         planner_state = (
             json.dumps(
-                MosaicPlanner(plan.total_chunks, seed=seed).state(),
+                MosaicPlanner(
+                    plan.total_chunks,
+                    seed=seed,
+                    lanes=lanes,
+                    target_puzzle=puzzle.number,
+                ).state(),
                 separators=(",", ":"),
                 sort_keys=True,
             )
@@ -411,12 +466,24 @@ class Coordinator:
             raise CoordinatorError("campaign planner mode is invalid")
         if row["planner_mode"] == "mosaic":
             try:
-                state = json.loads(row["planner_state"])
-                planner = MosaicPlanner(row["total_chunks"], seed=row["seed"])
-                planner.restore(state)
+                Coordinator._mosaic_planner(row)
             except (TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise CoordinatorError("campaign MOSAIC state is invalid") from exc
         return row
+
+    @staticmethod
+    def _mosaic_planner(campaign: sqlite3.Row) -> MosaicPlanner:
+        """Rebuild a stored MOSAIC planner with the lane set it was created with."""
+
+        state = json.loads(campaign["planner_state"])
+        planner = MosaicPlanner(
+            campaign["total_chunks"],
+            seed=campaign["seed"],
+            lanes=MosaicPlanner.lanes_from_state(state),
+            target_puzzle=campaign["puzzle"],
+        )
+        planner.restore(state)
+        return planner
 
     @staticmethod
     def _load_hypothesis(connection: sqlite3.Connection) -> sqlite3.Row:
@@ -446,6 +513,66 @@ class Coordinator:
                 if not isinstance(payload, dict):
                     raise CoordinatorError(f"Hypothesis Lab {name} must be an object")
         return row
+
+    def enable_cold(self) -> None:
+        """Switch a running campaign to the cold lane set, keeping coverage.
+
+        Completed chunks stay completed: the planner proposes chunks through
+        the same global duplicate filter, so nothing already searched is
+        re-issued. Hypothesis Lab is turned off because it takes priority over
+        the planner mode and would otherwise keep choosing the ranges.
+        """
+
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                campaign = self._load_campaign(connection)
+                if campaign["state"] != "running":
+                    raise CoordinatorError("only a running campaign can change mode")
+                live_leases = connection.execute(
+                    "SELECT COUNT(*) FROM work WHERE state = 'leased'"
+                ).fetchone()[0]
+                if live_leases:
+                    raise CoordinatorError(
+                        "stop all workers before changing the search mode"
+                    )
+
+                planner = MosaicPlanner(
+                    campaign["total_chunks"],
+                    seed=campaign["seed"],
+                    lanes=COLD_LANES,
+                    target_puzzle=campaign["puzzle"],
+                )
+                state = planner.state()
+                state["cursors"] = _carried_cursors(campaign, state["cursors"])
+                planner.restore(state)
+
+                connection.execute(
+                    """
+                    UPDATE campaign
+                       SET planner_mode = 'mosaic', planner_state = ?, updated_at = ?
+                     WHERE id = 1
+                    """,
+                    (
+                        json.dumps(
+                            planner.state(), separators=(",", ":"), sort_keys=True
+                        ),
+                        now,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE hypothesis_lab
+                       SET enabled = 0, updated_at = ?
+                     WHERE id = 1
+                    """,
+                    (now,),
+                )
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
 
     def enable_hypothesis(
         self,
@@ -519,7 +646,14 @@ class Coordinator:
                     )
                 planner_state = (
                     json.dumps(
-                        MosaicPlanner(campaign["total_chunks"], seed=seed).state(),
+                        MosaicPlanner(
+                            campaign["total_chunks"],
+                            seed=seed,
+                            lanes=MosaicPlanner.lanes_from_state(
+                                json.loads(campaign["planner_state"])
+                            ),
+                            target_puzzle=campaign["puzzle"],
+                        ).state(),
                         separators=(",", ":"),
                         sort_keys=True,
                     )
@@ -620,8 +754,7 @@ class Coordinator:
             chunk = Coordinator._plan(campaign).chunk_for_sequence(sequence)
             return chunk, "affine", sequence, None
 
-        planner = MosaicPlanner(campaign["total_chunks"], seed=campaign["seed"])
-        planner.restore(json.loads(campaign["planner_state"]))
+        planner = Coordinator._mosaic_planner(campaign)
         candidate = planner.next_unseen(_SQLiteSeen(connection))
         puzzle = get_puzzle(campaign["puzzle"])
         start = puzzle.start + candidate.chunk_id * campaign["chunk_size"]
@@ -1240,7 +1373,9 @@ class Coordinator:
             "address": puzzle.address,
             "state": campaign["state"],
             "planner_mode": (
-                "hypothesis" if hypothesis["enabled"] else campaign["planner_mode"]
+                "hypothesis"
+                if hypothesis["enabled"]
+                else _reported_planner_mode(campaign)
             ),
             "base_planner_mode": campaign["planner_mode"],
             "seed": campaign["seed"],

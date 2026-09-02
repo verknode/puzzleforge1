@@ -1,3 +1,11 @@
+[CmdletBinding()]
+param(
+    # Empty means: create new campaigns as hypothesis, and leave an existing
+    # campaign in whatever mode it is already running.
+    [ValidateSet("", "hypothesis", "cold")]
+    [string]$Mode = ""
+)
+
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
@@ -36,12 +44,16 @@ if (-not (Test-Path $Profile)) {
     if (-not $Engine) {
         throw "Place cuBitCrack.exe in the PuzzleForge folder and run Start-PuzzleForge.cmd again."
     }
-    & $VenvPython -m puzzleforge local-setup --binary $Engine --puzzle 71
+    $SetupMode = if ($Mode) { $Mode } else { "hypothesis" }
+    & $VenvPython -m puzzleforge local-setup --binary $Engine --puzzle 71 --mode $SetupMode
     if ($LASTEXITCODE -ne 0) { throw "PuzzleForge local setup failed." }
+} elseif ($Mode) {
+    $Current = (Get-Content $Profile -Raw | ConvertFrom-Json).planner_mode
+    if ($Current -ne $Mode) {
+        & $VenvPython -m puzzleforge "$Mode-enable"
+        if ($LASTEXITCODE -ne 0) { throw "Could not switch to $Mode mode." }
+    }
 }
-
-& $VenvPython -m puzzleforge hypothesis-enable
-if ($LASTEXITCODE -ne 0) { throw "Could not enable Hypothesis Lab." }
 
 & $VenvPython -m puzzleforge generator-enable --cpu-percent 10
 if ($LASTEXITCODE -ne 0) { throw "Could not enable Generator Lab." }

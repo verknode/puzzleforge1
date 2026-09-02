@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import math
 from dataclasses import asdict, dataclass, field
-from typing import Collection, Protocol
+from typing import Collection, Final, Protocol
 
 
 class ChunkOrder(Protocol):
@@ -180,6 +180,34 @@ class Lane:
             raise ValueError("lane weight must be positive")
 
 
+DEFAULT_LANES: Final[tuple[Lane, ...]] = (
+    Lane("uniform", 8),
+    Lane("spread", 4),
+    Lane("edges", 2),
+    Lane("center", 2),
+)
+
+# Six of every ten chunks go to the least-searched bands; the remaining four
+# keep an unbiased private permutation running, because the cold prior is a
+# behavioural model rather than a validated measurement.
+COLD_LANES: Final[tuple[Lane, ...]] = (
+    Lane("cold", 6),
+    Lane("uniform", 4),
+)
+
+LANE_PRESETS: Final[dict[str, tuple[Lane, ...]]] = {
+    "mosaic": DEFAULT_LANES,
+    "cold": COLD_LANES,
+}
+
+
+def preset_name(lanes: tuple[Lane, ...]) -> str:
+    for name, preset in LANE_PRESETS.items():
+        if lanes == preset:
+            return name
+    return "custom"
+
+
 @dataclass(frozen=True, slots=True)
 class MosaicCandidate:
     lane: str
@@ -198,12 +226,8 @@ class MosaicPlanner:
     non-uniform prior is real; it has no probability advantage for uniform data.
     """
 
-    DEFAULT_LANES = (
-        Lane("uniform", 8),
-        Lane("spread", 4),
-        Lane("edges", 2),
-        Lane("center", 2),
-    )
+    DEFAULT_LANES = DEFAULT_LANES
+    COLD_LANES = COLD_LANES
 
     def __init__(
         self,
@@ -211,6 +235,7 @@ class MosaicPlanner:
         *,
         seed: str,
         lanes: tuple[Lane, ...] | None = None,
+        target_puzzle: int | None = None,
     ) -> None:
         if total_chunks < 1:
             raise ValueError("total_chunks must be positive")
@@ -218,21 +243,51 @@ class MosaicPlanner:
             raise ValueError("seed must not be empty")
         self.total_chunks = total_chunks
         self.seed = seed
+        self.target_puzzle = target_puzzle
         self.lanes = lanes or self.DEFAULT_LANES
         if len({lane.name for lane in self.lanes}) != len(self.lanes):
             raise ValueError("lane names must be unique")
-        self._orders = {
+        self._orders: dict[str, ChunkOrder] = {
             "uniform": PrivatePermutationOrder(total_chunks, seed),
             "spread": BitSpreadOrder(total_chunks, seed),
             "edges": EdgeOrder(total_chunks),
             "center": CenterOrder(total_chunks),
         }
+        if any(lane.name == "cold" for lane in self.lanes):
+            if target_puzzle is None:
+                raise ValueError("the cold lane requires a target puzzle number")
+            from .coldzone import ColdOrder
+
+            self._orders["cold"] = ColdOrder(total_chunks, seed, target_puzzle)
         unknown = [lane.name for lane in self.lanes if lane.name not in self._orders]
         if unknown:
             raise ValueError(f"unknown MOSAIC lanes: {', '.join(unknown)}")
+
         self._wheel = _weighted_wheel(self.lanes)
         self._slot = 0
         self._cursors = {lane.name: 0 for lane in self.lanes}
+
+    @staticmethod
+    def lanes_from_state(state: dict[str, object]) -> tuple[Lane, ...]:
+        """Recover the lane set a stored campaign was created with."""
+
+        raw = state.get("lanes") if isinstance(state, dict) else None
+        if not isinstance(raw, list) or not raw:
+            raise ValueError("MOSAIC state has no lane list")
+        lanes: list[Lane] = []
+        for entry in raw:
+            if not isinstance(entry, dict) or set(entry) != {"name", "weight"}:
+                raise ValueError("MOSAIC lane entry is invalid")
+            name = entry["name"]
+            weight = entry["weight"]
+            if (
+                not isinstance(name, str)
+                or isinstance(weight, bool)
+                or not isinstance(weight, int)
+            ):
+                raise ValueError("MOSAIC lane entry is invalid")
+            lanes.append(Lane(name, weight))
+        return tuple(lanes)
 
     def state(self) -> dict[str, object]:
         return {

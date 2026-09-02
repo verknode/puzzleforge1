@@ -76,7 +76,7 @@ class LocalProfile:
             raise ValueError("local profile chunk size is invalid")
         if not 10 <= self.target_chunk_seconds <= 86_400:
             raise ValueError("local profile target chunk duration is invalid")
-        if self.planner_mode not in {"affine", "mosaic", "hypothesis"}:
+        if self.planner_mode not in {"affine", "mosaic", "cold", "hypothesis"}:
             raise ValueError("local profile planner mode is invalid")
         if not self.seed:
             raise ValueError("local profile seed is empty")
