@@ -45,6 +45,7 @@
 
 - [x] MOSAIC deterministic strategy lanes and global de-duplication planner
 - [x] Cold Zone public-search-density prior and least-searched-first ordering
+- [x] In-place search-mode switching that preserves completed coverage
 - [x] Persist MOSAIC lane cursors in the lease coordinator
 - [x] Verified solved-vector dataset and forward-only holdout backtests
 - [x] Persistent Hypothesis Lab 10/90 analysis/search cycles

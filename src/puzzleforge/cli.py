@@ -573,6 +573,23 @@ def command_hypothesis_enable(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_cold_enable(args: argparse.Namespace) -> int:
+    from .coordinator import Coordinator
+    from .local import load_profile, save_profile
+
+    profile = load_profile(args.profile)
+    # The coordinator runs first: if it refuses, the profile is left untouched
+    # instead of claiming a mode the campaign is not in.
+    Coordinator(Path(profile.database)).enable_cold()
+    save_profile(
+        args.profile,
+        replace(profile, planner_mode="cold", hypothesis_enabled=False),
+    )
+    print("Cold Zone enabled: 60% least-searched bands / 40% unbiased")
+    print("Completed ranges are kept; Hypothesis Lab is now off.")
+    return 0
+
+
 def command_generator_enable(args: argparse.Namespace) -> int:
     from .generator_lab import default_generator_lab
     from .local import load_profile, save_profile
@@ -1243,6 +1260,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile", type=Path, default=Path(".puzzleforge/local/profile.json")
     )
     hypothesis_enable_parser.set_defaults(handler=command_hypothesis_enable)
+
+    cold_enable_parser = subparsers.add_parser(
+        "cold-enable",
+        help="switch a local campaign to Cold Zone without losing coverage",
+    )
+    cold_enable_parser.add_argument(
+        "--profile", type=Path, default=Path(".puzzleforge/local/profile.json")
+    )
+    cold_enable_parser.set_defaults(handler=command_cold_enable)
 
     generator_enable_parser = subparsers.add_parser(
         "generator-enable",

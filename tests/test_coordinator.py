@@ -1,10 +1,11 @@
+import json
 import sqlite3
 import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
 
-from puzzleforge.coordinator import Coordinator, LeaseRejected
+from puzzleforge.coordinator import Coordinator, CoordinatorError, LeaseRejected
 
 
 class CoordinatorTests(unittest.TestCase):
@@ -23,6 +24,110 @@ class CoordinatorTests(unittest.TestCase):
             seed="coordinator-tests",
             planner_mode=planner_mode,
         )
+
+    def test_enable_cold_keeps_coverage_and_turns_hypothesis_off(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            coordinator = self.make_coordinator(
+                directory, chunk_size=1 << 40, planner_mode="hypothesis"
+            )
+            completed = []
+            for index in range(5):
+                lease = coordinator.lease(
+                    "gpu-a", lease_seconds=600, now_epoch=4_000_000_000 + index
+                )
+                coordinator.complete(
+                    lease.token, "gpu-a", checked=lease.keys, elapsed_seconds=1.0
+                )
+                completed.append(lease.chunk_id)
+
+            coordinator.enable_cold()
+
+            status = coordinator.status()
+            self.assertEqual(status["planner_mode"], "cold")
+            self.assertEqual(status["completed_chunks"], 5)
+
+            after = [
+                coordinator.lease(
+                    "gpu-a", lease_seconds=600, now_epoch=4_000_000_100 + index
+                )
+                for index in range(8)
+            ]
+            self.assertEqual(
+                {lease.strategy_lane for lease in after}, {"cold", "uniform"}
+            )
+            self.assertFalse(
+                {lease.chunk_id for lease in after} & set(completed),
+                "a completed chunk was handed out again",
+            )
+
+    def test_enable_cold_from_an_affine_campaign(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            coordinator = self.make_coordinator(
+                directory, chunk_size=1 << 40, planner_mode="affine"
+            )
+            lease = coordinator.lease(
+                "gpu-a", lease_seconds=600, now_epoch=4_000_000_000
+            )
+            coordinator.complete(
+                lease.token, "gpu-a", checked=lease.keys, elapsed_seconds=1.0
+            )
+            coordinator.enable_cold()
+            self.assertEqual(coordinator.status()["planner_mode"], "cold")
+            self.assertEqual(coordinator.status()["completed_chunks"], 1)
+
+    def test_enable_cold_survives_a_reopen_and_is_reversible(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "campaign.sqlite3"
+            coordinator = Coordinator.initialize(
+                path,
+                puzzle_number=71,
+                chunk_size=1 << 40,
+                seed="coordinator-tests",
+                planner_mode="hypothesis",
+            )
+            coordinator.enable_cold()
+            self.assertEqual(Coordinator(path).status()["planner_mode"], "cold")
+            coordinator.enable_hypothesis()
+            self.assertEqual(Coordinator(path).status()["planner_mode"], "hypothesis")
+
+    def test_enable_cold_refuses_while_a_lease_is_live(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            coordinator = self.make_coordinator(
+                directory, chunk_size=1 << 40, planner_mode="affine"
+            )
+            coordinator.lease("gpu-a", lease_seconds=600, now_epoch=4_000_000_000)
+            with self.assertRaises(CoordinatorError):
+                coordinator.enable_cold()
+            self.assertEqual(coordinator.status()["planner_mode"], "affine")
+
+    def test_enable_cold_carries_the_uniform_cursor_forward(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            coordinator = self.make_coordinator(
+                directory, chunk_size=1 << 40, planner_mode="mosaic"
+            )
+            for index in range(12):
+                lease = coordinator.lease(
+                    "gpu-a", lease_seconds=600, now_epoch=4_000_000_000 + index
+                )
+                coordinator.complete(
+                    lease.token, "gpu-a", checked=lease.keys, elapsed_seconds=1.0
+                )
+            before = json.loads(
+                sqlite3.connect(Path(directory) / "campaign.sqlite3")
+                .execute("SELECT planner_state FROM campaign")
+                .fetchone()[0]
+            )["cursors"]["uniform"]
+            self.assertGreater(before, 0)
+
+            coordinator.enable_cold()
+
+            after = json.loads(
+                sqlite3.connect(Path(directory) / "campaign.sqlite3")
+                .execute("SELECT planner_state FROM campaign")
+                .fetchone()[0]
+            )["cursors"]
+            self.assertEqual(after["uniform"], before)
+            self.assertEqual(after["cold"], 0)
 
     def test_cold_mode_reports_its_preset_and_uses_both_lanes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

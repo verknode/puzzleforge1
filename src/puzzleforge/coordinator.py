@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .crypto import p2pkh_address_from_private_key
-from .mosaic import LANE_PRESETS, MosaicPlanner, preset_name
+from .mosaic import COLD_LANES, LANE_PRESETS, MosaicPlanner, preset_name
 from .partition import ChunkPlan, KeyChunk
 from .registry import get_puzzle
 
@@ -23,6 +23,36 @@ from .registry import get_puzzle
 SCHEMA_VERSION = 3
 SQLITE_MAX_INTEGER = (1 << 63) - 1
 _WORKER_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}\Z")
+
+
+def _carried_cursors(
+    campaign: sqlite3.Row, fresh: dict[str, int]
+) -> dict[str, int]:
+    """Keep the cursor of any lane the previous lane set already advanced.
+
+    A carried cursor is only an optimization: the duplicate filter already
+    guarantees correctness. Without it a lane would re-walk every rank it has
+    already proposed before reaching unseen ground.
+    """
+
+    if campaign["planner_mode"] != "mosaic" or not campaign["planner_state"]:
+        return fresh
+    try:
+        previous = json.loads(campaign["planner_state"]).get("cursors")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return fresh
+    if not isinstance(previous, dict):
+        return fresh
+    carried = dict(fresh)
+    for name in carried:
+        value = previous.get(name)
+        if (
+            not isinstance(value, bool)
+            and isinstance(value, int)
+            and 0 <= value <= campaign["total_chunks"]
+        ):
+            carried[name] = value
+    return carried
 
 
 def _reported_planner_mode(campaign: sqlite3.Row) -> str:
@@ -483,6 +513,66 @@ class Coordinator:
                 if not isinstance(payload, dict):
                     raise CoordinatorError(f"Hypothesis Lab {name} must be an object")
         return row
+
+    def enable_cold(self) -> None:
+        """Switch a running campaign to the cold lane set, keeping coverage.
+
+        Completed chunks stay completed: the planner proposes chunks through
+        the same global duplicate filter, so nothing already searched is
+        re-issued. Hypothesis Lab is turned off because it takes priority over
+        the planner mode and would otherwise keep choosing the ranges.
+        """
+
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                campaign = self._load_campaign(connection)
+                if campaign["state"] != "running":
+                    raise CoordinatorError("only a running campaign can change mode")
+                live_leases = connection.execute(
+                    "SELECT COUNT(*) FROM work WHERE state = 'leased'"
+                ).fetchone()[0]
+                if live_leases:
+                    raise CoordinatorError(
+                        "stop all workers before changing the search mode"
+                    )
+
+                planner = MosaicPlanner(
+                    campaign["total_chunks"],
+                    seed=campaign["seed"],
+                    lanes=COLD_LANES,
+                    target_puzzle=campaign["puzzle"],
+                )
+                state = planner.state()
+                state["cursors"] = _carried_cursors(campaign, state["cursors"])
+                planner.restore(state)
+
+                connection.execute(
+                    """
+                    UPDATE campaign
+                       SET planner_mode = 'mosaic', planner_state = ?, updated_at = ?
+                     WHERE id = 1
+                    """,
+                    (
+                        json.dumps(
+                            planner.state(), separators=(",", ":"), sort_keys=True
+                        ),
+                        now,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE hypothesis_lab
+                       SET enabled = 0, updated_at = ?
+                     WHERE id = 1
+                    """,
+                    (now,),
+                )
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
 
     def enable_hypothesis(
         self,

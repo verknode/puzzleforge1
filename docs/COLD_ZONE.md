@@ -74,6 +74,17 @@ puzzleforge local-setup --binary ./cuBitCrack --puzzle 71 --mode cold
 puzzleforge local-app
 ```
 
+Switch a campaign that is already running, keeping every completed range.
+Hypothesis Lab is turned off by this command because it takes priority over the
+planner mode and would otherwise keep choosing the ranges. Stop the workers
+first:
+
+```bash
+puzzleforge cold-enable
+```
+
+`puzzleforge hypothesis-enable` switches back the same way.
+
 Or a distributed campaign:
 
 ```bash

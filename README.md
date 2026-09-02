@@ -96,9 +96,18 @@ puzzleforge local-app
 
 On Windows, `Start-PuzzleForge.cmd` creates/updates the local environment,
 performs first setup when `cuBitCrack.exe` is present, starts the campaign, and
-opens the dashboard. It also enables Hypothesis Lab and Generator Lab for both
-new and existing local profiles. Subsequent launches resume both durable
-campaign cursors.
+opens the dashboard. A new profile is created in Hypothesis Lab mode and
+Generator Lab is enabled for every profile. An existing campaign keeps the mode
+it is already running: a plain double-click never overrides that choice. Pass a
+mode to change it, which switches the running campaign without losing any
+completed range:
+
+```
+Start-PuzzleForge.cmd -Mode cold
+Start-PuzzleForge.cmd -Mode hypothesis
+```
+
+Subsequent launches resume both durable campaign cursors.
 
 ### Arm a verified-match sweep
 
@@ -332,6 +341,16 @@ and no mode claims a cryptographic shortcut.
 ```bash
 puzzleforge local-setup --binary ./cuBitCrack --puzzle 71 --mode cold
 puzzleforge coordinator-init campaign.sqlite3 71 --mode cold
+```
+
+A campaign that is already running can change mode in place. Completed ranges
+are kept, because the planner still proposes through the global duplicate
+filter, so nothing already searched is handed out again. Stop the workers
+first:
+
+```bash
+puzzleforge cold-enable
+puzzleforge hypothesis-enable
 ```
 
 ## Searching where others have not
