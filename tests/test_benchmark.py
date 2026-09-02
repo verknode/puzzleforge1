@@ -29,9 +29,30 @@ class RateEngine:
 class BenchmarkTests(unittest.TestCase):
     def test_quick_profile_is_bounded_and_valid(self) -> None:
         profiles = tuning_profiles("quick", device=2)
-        self.assertEqual(len(profiles), 4)
+        self.assertEqual(len(profiles), 6)
         self.assertTrue(all(profile.device == 2 for profile in profiles))
-        self.assertTrue(all(profile.threads % 32 == 0 for profile in profiles))
+        self.assertTrue(
+            all(
+                profile.threads is None or profile.threads % 32 == 0
+                for profile in profiles
+            )
+        )
+
+    def test_every_profile_set_benchmarks_the_engine_defaults(self) -> None:
+        # Without a flag-free candidate the search cannot discover that the
+        # binary's own device detection beats every fixed grid.
+        for name in ("quick", "balanced", "full"):
+            with self.subTest(profile=name):
+                profiles = tuning_profiles(name, device=0)
+                bare = [
+                    profile
+                    for profile in profiles
+                    if profile.blocks is None
+                    and profile.threads is None
+                    and profile.points is None
+                ]
+                self.assertEqual(len(bare), 1)
+                self.assertEqual(bare[0].device, 0)
 
     def test_fastest_profile_is_recommended_and_report_is_atomic(self) -> None:
         profiles = (
