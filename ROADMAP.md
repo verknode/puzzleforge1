@@ -12,7 +12,7 @@
 ## M1 — native engine
 
 - [ ] C++20 reference backend using libsecp256k1
-- [ ] Batched point generation (one scalar multiplication per batch)
+- [x] Batched point generation (one scalar multiplication per batch)
 - [ ] SIMD SHA-256 and RIPEMD-160 pipeline
 - [x] Stable machine-readable worker protocol
 - [ ] Cross-backend golden-vector tests
@@ -44,6 +44,7 @@
 ## M4 — experimental scheduling and elastic capacity
 
 - [x] MOSAIC deterministic strategy lanes and global de-duplication planner
+- [x] Cold Zone public-search-density prior and least-searched-first ordering
 - [x] Persist MOSAIC lane cursors in the lease coordinator
 - [x] Verified solved-vector dataset and forward-only holdout backtests
 - [x] Persistent Hypothesis Lab 10/90 analysis/search cycles

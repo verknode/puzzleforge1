@@ -24,6 +24,56 @@ class CoordinatorTests(unittest.TestCase):
             planner_mode=planner_mode,
         )
 
+    def test_cold_mode_reports_its_preset_and_uses_both_lanes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            coordinator = self.make_coordinator(
+                directory, chunk_size=1 << 40, planner_mode="cold"
+            )
+            self.assertEqual(coordinator.status()["planner_mode"], "cold")
+            leases = [
+                coordinator.lease("gpu-a", lease_seconds=60, now_epoch=1000 + index)
+                for index in range(10)
+            ]
+            self.assertEqual(
+                {lease.strategy_lane for lease in leases}, {"cold", "uniform"}
+            )
+            self.assertEqual(len({lease.chunk_id for lease in leases}), 10)
+
+    def test_cold_campaign_restores_its_lane_set_from_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "campaign.sqlite3"
+            first = Coordinator.initialize(
+                path,
+                puzzle_number=71,
+                chunk_size=1 << 40,
+                seed="coordinator-tests",
+                planner_mode="cold",
+            )
+            # Far-future epochs keep the first lease live, so the status call
+            # below cannot reclaim it and hand the same chunk back.
+            first.lease("gpu-a", lease_seconds=600, now_epoch=4_000_000_000)
+            reopened = Coordinator(path)
+            self.assertEqual(reopened.status()["planner_mode"], "cold")
+            self.assertEqual(
+                reopened.lease(
+                    "gpu-b", lease_seconds=600, now_epoch=4_000_000_001
+                ).strategy_lane,
+                "uniform",
+            )
+
+    def test_cold_campaign_keeps_its_lanes_across_a_reseed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            coordinator = self.make_coordinator(
+                directory, chunk_size=1 << 40, planner_mode="cold"
+            )
+            coordinator.reseed("a-new-private-order")
+            self.assertEqual(coordinator.status()["planner_mode"], "cold")
+
+    def test_rejects_an_unknown_planner_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(ValueError):
+                self.make_coordinator(directory, planner_mode="warm")
+
     def test_consecutive_leases_never_overlap(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             coordinator = self.make_coordinator(directory)

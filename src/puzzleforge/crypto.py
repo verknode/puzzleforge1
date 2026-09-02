@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Final, TypeAlias
+from functools import lru_cache
+from typing import Final, Iterator, Sequence, TypeAlias
 
 
 FIELD_P: Final = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
@@ -55,6 +56,113 @@ def scalar_multiply(scalar: int, point: Point = GENERATOR) -> Point:
         addend = point_add(addend, addend)
         value >>= 1
     return result
+
+
+DEFAULT_BATCH_SIZE: Final = 1024
+
+
+def batch_inverse(values: Sequence[int]) -> list[int]:
+    """Invert every entry with a single modular inversion (Montgomery trick).
+
+    Entries equal to zero have no inverse and are returned as zero so the
+    caller can fall back to the generic addition path for that step.
+    """
+
+    count = len(values)
+    prefixes = [0] * count
+    running = 1
+    for index, value in enumerate(values):
+        prefixes[index] = running
+        if value:
+            running = running * value % FIELD_P
+
+    inverse = pow(running, -1, FIELD_P)
+    results = [0] * count
+    for index in range(count - 1, -1, -1):
+        value = values[index]
+        if not value:
+            continue
+        results[index] = prefixes[index] * inverse % FIELD_P
+        inverse = inverse * value % FIELD_P
+    return results
+
+
+@lru_cache(maxsize=8)
+def generator_multiples(count: int) -> tuple[tuple[int, int], ...]:
+    """Affine points ``1*G`` through ``count*G``."""
+
+    if count < 1:
+        raise ValueError("multiple count must be positive")
+    table: list[tuple[int, int]] = [(GENERATOR_X, GENERATOR_Y)]
+    for _ in range(count - 1):
+        nxt = point_add(table[-1], GENERATOR)
+        if nxt is None:
+            raise ValueError("generator multiple table reached the point at infinity")
+        table.append(nxt)
+    return tuple(table)
+
+
+def iter_sequential_points(
+    start_scalar: int,
+    count: int,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+) -> Iterator[tuple[int, int]]:
+    """Yield affine points for the consecutive scalars ``start_scalar ...``.
+
+    One scalar multiplication starts the walk and each block of ``batch_size``
+    keys costs a single modular inversion instead of one inversion per key.
+    Every emitted point is identical to ``scalar_multiply`` for the same
+    scalar; the batching changes cost, never the result.
+    """
+
+    if count < 1:
+        return
+    if batch_size < 1:
+        raise ValueError("batch size must be positive")
+    if not 0 < start_scalar <= GROUP_N - count:
+        raise ValueError("sequential walk leaves the secp256k1 scalar range")
+
+    width = batch_size if batch_size < count else count
+    table = generator_multiples(width)
+    current = scalar_multiply(start_scalar)
+    emitted = 0
+
+    while emitted < count:
+        if current is None:
+            raise ValueError("sequential walk reached the point at infinity")
+        base_x, base_y = current
+        remaining = count - emitted
+        block = width if width < remaining else remaining
+        advance = remaining > block
+        steps = block - 1 + (1 if advance else 0)
+
+        yield current
+        emitted += 1
+        if steps < 1:
+            return
+
+        inverses = batch_inverse(
+            [(table[index][0] - base_x) % FIELD_P for index in range(steps)]
+        )
+        following: Point = None
+        for index in range(steps):
+            inverse = inverses[index]
+            if inverse:
+                addend_x, addend_y = table[index]
+                slope = (addend_y - base_y) * inverse % FIELD_P
+                x3 = (slope * slope - base_x - addend_x) % FIELD_P
+                point = (x3, (slope * (base_x - x3) - base_y) % FIELD_P)
+            else:
+                point = point_add(current, table[index])
+                if point is None:
+                    raise ValueError("sequential walk reached the point at infinity")
+            if index + 1 < block:
+                yield point
+                emitted += 1
+            else:
+                following = point
+        if advance:
+            current = following
 
 
 def compressed_public_key(point: Point) -> bytes:

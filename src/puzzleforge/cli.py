@@ -11,7 +11,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 from .checkpoint import load_checkpoint
-from .crypto import p2pkh_address_from_private_key
+from .crypto import DEFAULT_BATCH_SIZE, p2pkh_address_from_private_key
 from .partition import ChunkPlan
 from .registry import get_puzzle, puzzles
 from .scanner import run_session
@@ -135,6 +135,7 @@ def command_scan(args: argparse.Namespace) -> int:
         chunks=args.chunks,
         workers=args.workers,
         checkpoint_path=checkpoint,
+        batch_size=args.batch_size,
     )
     print(f"Checked this run: {result.checked:,}")
     print(f"Chunks completed: {result.completed_chunks:,}")
@@ -166,6 +167,75 @@ def command_verify(args: argparse.Namespace) -> int:
     print(f"Target address:  {puzzle.address}")
     print(f"Match:           {'yes' if matches else 'no'}")
     return 0 if matches else 1
+
+
+def command_cold_preview(args: argparse.Namespace) -> int:
+    from .coldzone import COMPONENTS, ColdOrder
+    from .mosaic import COLD_LANES, MosaicPlanner
+
+    puzzle = get_puzzle(args.puzzle)
+    total_chunks = (puzzle.size + args.chunk_size - 1) // args.chunk_size
+    order = ColdOrder(total_chunks, args.seed, puzzle.number, bands=args.bands)
+    planner = MosaicPlanner(
+        total_chunks,
+        seed=args.seed,
+        lanes=COLD_LANES,
+        target_puzzle=puzzle.number,
+    )
+
+    bands = []
+    for row in order.band_report(args.bands_preview):
+        low = puzzle.start + int(row["start_fraction"] * puzzle.size)
+        high = puzzle.start + int(row["end_fraction"] * puzzle.size) - 1
+        bands.append({**row, "start": f"{low:x}", "end": f"{high:x}"})
+
+    candidates = []
+    for candidate in planner.preview(args.preview):
+        start = puzzle.start + candidate.chunk_id * args.chunk_size
+        end = min(start + args.chunk_size - 1, puzzle.end)
+        candidates.append(
+            {
+                **candidate.to_dict(),
+                "start": f"{start:x}",
+                "end": f"{end:x}",
+                "keys": end - start + 1,
+            }
+        )
+
+    print(
+        json.dumps(
+            {
+                "experimental": True,
+                "uniform_target_advantage_claimed": False,
+                "note": (
+                    "Ordering only. The chunk set and the coverage probability "
+                    "for a given number of unique keys are unchanged. The cold "
+                    "prior models public search behaviour; it is not measured "
+                    "telemetry and is not a cryptographic shortcut."
+                ),
+                "puzzle": puzzle.number,
+                "seed": args.seed,
+                "chunk_size": args.chunk_size,
+                "total_chunks": total_chunks,
+                "bands": order.bands,
+                "components": [
+                    {
+                        "name": component.name,
+                        "weight": component.weight,
+                        "rationale": component.rationale,
+                    }
+                    for component in COMPONENTS
+                ],
+                "coldest_bands": bands,
+                "lanes": [
+                    {"name": lane.name, "weight": lane.weight} for lane in COLD_LANES
+                ],
+                "candidates": candidates,
+            },
+            indent=2,
+        )
+    )
+    return 0
 
 
 def command_mosaic_preview(args: argparse.Namespace) -> int:
@@ -991,6 +1061,15 @@ def build_parser() -> argparse.ArgumentParser:
     scan_parser.add_argument("--chunks", type=positive_integer, default=1)
     scan_parser.add_argument("--workers", type=positive_integer, default=os.cpu_count() or 1)
     scan_parser.add_argument("--checkpoint", type=Path)
+    scan_parser.add_argument(
+        "--batch-size",
+        type=positive_integer,
+        default=DEFAULT_BATCH_SIZE,
+        help=(
+            "keys per batched point block; one modular inversion is shared by "
+            "the whole block"
+        ),
+    )
     scan_parser.set_defaults(handler=command_scan)
 
     status_parser = subparsers.add_parser("status", help="show a checkpoint")
@@ -1014,6 +1093,18 @@ def build_parser() -> argparse.ArgumentParser:
     mosaic_parser.add_argument("--seed", default="puzzleforge-mosaic-v1")
     mosaic_parser.add_argument("--preview", type=positive_integer, default=16)
     mosaic_parser.set_defaults(handler=command_mosaic_preview)
+
+    cold_parser = subparsers.add_parser(
+        "cold-preview",
+        help="preview the least-searched keyspace bands and the cold work order",
+    )
+    cold_parser.add_argument("puzzle", type=int, choices=[p.number for p in puzzles()])
+    cold_parser.add_argument("--chunk-size", type=positive_integer, default=1 << 32)
+    cold_parser.add_argument("--seed", default="puzzleforge-cold-v1")
+    cold_parser.add_argument("--preview", type=positive_integer, default=16)
+    cold_parser.add_argument("--bands", type=positive_integer, default=4096)
+    cold_parser.add_argument("--bands-preview", type=positive_integer, default=8)
+    cold_parser.set_defaults(handler=command_cold_preview)
 
     hypothesis_parser = subparsers.add_parser(
         "hypothesis-preview",
@@ -1108,7 +1199,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="target runtime per durable checkpoint chunk",
     )
     local_setup_parser.add_argument(
-        "--mode", choices=("affine", "mosaic", "hypothesis"), default="hypothesis"
+        "--mode",
+        choices=("affine", "mosaic", "cold", "hypothesis"),
+        default="hypothesis",
     )
     local_setup_parser.add_argument(
         "--seed",
@@ -1223,7 +1316,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     coordinator_init_parser.add_argument("--seed", default="puzzleforge-distributed")
     coordinator_init_parser.add_argument(
-        "--mode", choices=("affine", "mosaic", "hypothesis"), default="affine"
+        "--mode",
+        choices=("affine", "mosaic", "cold", "hypothesis"),
+        default="affine",
     )
     coordinator_init_parser.set_defaults(handler=command_coordinator_init)
 

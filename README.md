@@ -14,7 +14,10 @@ of a key independently verified against a registered public-puzzle address.
 - dependency-free secp256k1 and compressed P2PKH reference implementation;
 - reviewed registry entries for puzzles #8 and #71–#74;
 - private-seeded cryptographic, non-overlapping chunk allocation;
-- parallel CPU reference scanner with resumable atomic checkpoints;
+- batched-inversion CPU reference scanner, measured 4x faster than the
+  one-inversion-per-key walk it replaces, with resumable atomic checkpoints;
+- Cold Zone scheduling that orders work toward the keyspace public
+  searchers are least likely to have covered;
 - strict cuBitCrack/clBitCrack adapter with independent result verification;
 - local-first GPU profile with validation, auto-tuning, adaptive durable chunks,
   and one-command resume;
@@ -245,6 +248,16 @@ puzzleforge scan 71 \
   --seed furnes
 ```
 
+The reference scanner walks consecutive keys with batched point addition: one
+modular inversion is shared by a whole block instead of paid per key, and one
+process pool is reused across every chunk in a session. Measured on one CPU
+core against puzzle #71, this is about four times the throughput of the
+previous one-inversion-per-key walk, and every emitted point is still identical
+to `scalar_multiply` for the same scalar. Tune the block with `--batch-size`
+(default 1024); the fastest setting on the reference machine was 1024-2048.
+This remains a correctness oracle, not the fast path. GPU work still goes to
+BitCrack.
+
 Resume by running the same command again. The checkpoint records the next
 chunk. Different machines must use the same seed and chunk size, a shared
 `--shards` value, and a unique `--shard-index`:
@@ -302,6 +315,47 @@ For the same number of attempts, unique sampling is strictly better than random
 sampling with replacement because repeated candidates add no coverage. The
 advantage starts tiny and grows with campaign size; higher measured throughput
 remains the dominant practical improvement.
+
+## Search modes
+
+One `--mode` flag selects how a campaign orders its work. Every mode is a
+bijection over the same chunk set, so exact coverage accounting is identical
+and no mode claims a cryptographic shortcut.
+
+| Mode | Order | Use it when |
+|---|---|---|
+| `affine` | One keyed private permutation | You want plain unbiased coverage |
+| `mosaic` | Uniform, bit-spread, edge-in, and center-out lanes interleaved | You want several deterministic orders behind one duplicate filter |
+| `cold` | Least-searched bands first, with an unbiased lane alongside | You want to avoid ground other public searchers have already covered |
+| `hypothesis` | 10/90 research-to-search cycles from the model zoo | You want the validated-model path with automatic uniform fallback |
+
+```bash
+puzzleforge local-setup --binary ./cuBitCrack --puzzle 71 --mode cold
+puzzleforge coordinator-init campaign.sqlite3 71 --mode cold
+```
+
+## Searching where others have not
+
+Cold Zone models where public search effort concentrates, then orders work away
+from it. The model is a documented behavioural prior over six components:
+sequential sweeps from the interval start and end, hex-round boundaries, the
+center split, the normalized positions of already solved puzzles, and a uniform
+floor for random-mode searchers.
+
+```bash
+puzzleforge cold-preview 71 --chunk-size 0x100000000 --preview 16
+```
+
+The report names each cold band's key interval, its modelled relative effort,
+and the component that dominates that score.
+
+Two effects are real: less duplicated work against other searchers, and a
+genuine posterior tilt, because a region others already searched without
+solving the puzzle is less likely to hold the key. The tilt is bounded by how
+much of the interval the public has actually covered, which for #71 is
+negligible, so the default preset keeps four of every ten chunks on an unbiased
+lane. This is a prior that can be argued with, not measured telemetry. See
+[docs/COLD_ZONE.md](docs/COLD_ZONE.md).
 
 ## Experimental MOSAIC scheduler
 
