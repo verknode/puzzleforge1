@@ -88,24 +88,29 @@ class BenchmarkReport:
 
 
 def tuning_profiles(name: str, device: int | None = None) -> tuple[EngineTuning, ...]:
+    # ``None`` benchmarks the engine's own device defaults, with no grid flags
+    # passed at all. A hand-tuned binary often beats every fixed grid here, and
+    # without this entry the search could never find that out.
     presets = {
         "quick": (
+            None,
             (16, 128, 256),
             (32, 128, 512),
             (32, 256, 512),
             (64, 256, 1024),
+            (128, 256, 1024),
         ),
-        "balanced": tuple(
+        "balanced": (None,) + tuple(
             (blocks, threads, points)
-            for blocks in (16, 32, 64)
+            for blocks in (16, 32, 64, 128)
             for threads in (128, 256)
-            for points in (256, 512)
-        ),
-        "full": tuple(
-            (blocks, threads, points)
-            for blocks in (16, 32, 64)
-            for threads in (128, 256, 512)
             for points in (256, 512, 1024)
+        ),
+        "full": (None,) + tuple(
+            (blocks, threads, points)
+            for blocks in (16, 32, 64, 128)
+            for threads in (128, 256, 512)
+            for points in (256, 512, 1024, 2048)
         ),
     }
     try:
@@ -113,13 +118,15 @@ def tuning_profiles(name: str, device: int | None = None) -> tuple[EngineTuning,
     except KeyError as exc:
         raise ValueError("benchmark profile must be quick, balanced, or full") from exc
     return tuple(
-        EngineTuning(
+        EngineTuning(device=device)
+        if entry is None
+        else EngineTuning(
             device=device,
-            blocks=blocks,
-            threads=threads,
-            points=points,
+            blocks=entry[0],
+            threads=entry[1],
+            points=entry[2],
         )
-        for blocks, threads, points in values
+        for entry in values
     )
 
 
