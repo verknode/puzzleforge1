@@ -50,6 +50,59 @@ class AffineOrder:
 
 
 @dataclass(frozen=True, slots=True)
+class PrivatePermutationOrder:
+    """Keyed format-preserving permutation over ``range(size)``."""
+
+    size: int
+    seed: str
+    name: str = "private-prp"
+    _half_bits: int = field(init=False, repr=False)
+    _mask: int = field(init=False, repr=False)
+    _key: bytes = field(init=False, repr=False)
+
+    _ROUNDS = 10
+
+    def __post_init__(self) -> None:
+        if self.size < 1:
+            raise ValueError("strategy size must be positive")
+        if not self.seed:
+            raise ValueError("strategy seed must not be empty")
+        bits = max(2, (self.size - 1).bit_length())
+        if bits % 2:
+            bits += 1
+        half_bits = bits // 2
+        key = hashlib.blake2b(
+            f"PuzzleForge/private-prp/v1/{self.size}/{self.seed}".encode(),
+            digest_size=32,
+        ).digest()
+        object.__setattr__(self, "_half_bits", half_bits)
+        object.__setattr__(self, "_mask", (1 << half_bits) - 1)
+        object.__setattr__(self, "_key", key)
+
+    def _round_function(self, right: int, round_number: int) -> int:
+        width = (self._half_bits + 7) // 8
+        payload = bytes((round_number,)) + right.to_bytes(width, "big")
+        digest = hashlib.blake2b(payload, key=self._key, digest_size=16).digest()
+        return int.from_bytes(digest, "big") & self._mask
+
+    def _permutation(self, value: int) -> int:
+        left = value >> self._half_bits
+        right = value & self._mask
+        for round_number in range(self._ROUNDS):
+            left, right = right, left ^ self._round_function(right, round_number)
+        return (left << self._half_bits) | right
+
+    def chunk_id(self, rank: int) -> int:
+        _assert_rank(rank, self.size)
+        if self.size == 1:
+            return 0
+        candidate = self._permutation(rank)
+        while candidate >= self.size:
+            candidate = self._permutation(candidate)
+        return candidate
+
+
+@dataclass(frozen=True, slots=True)
 class EdgeOrder:
     size: int
     name: str = "edges"
@@ -169,7 +222,7 @@ class MosaicPlanner:
         if len({lane.name for lane in self.lanes}) != len(self.lanes):
             raise ValueError("lane names must be unique")
         self._orders = {
-            "uniform": AffineOrder(total_chunks, seed),
+            "uniform": PrivatePermutationOrder(total_chunks, seed),
             "spread": BitSpreadOrder(total_chunks, seed),
             "edges": EdgeOrder(total_chunks),
             "center": CenterOrder(total_chunks),

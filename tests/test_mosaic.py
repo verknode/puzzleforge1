@@ -6,6 +6,7 @@ from puzzleforge.mosaic import (
     CenterOrder,
     EdgeOrder,
     MosaicPlanner,
+    PrivatePermutationOrder,
 )
 
 
@@ -14,6 +15,7 @@ class MosaicTests(unittest.TestCase):
         for size in (1, 2, 3, 7, 17, 63, 127):
             orders = (
                 AffineOrder(size, "test"),
+                PrivatePermutationOrder(size, "test"),
                 BitSpreadOrder(size, "test"),
                 EdgeOrder(size),
                 CenterOrder(size),
@@ -45,6 +47,28 @@ class MosaicTests(unittest.TestCase):
     def test_edge_and_center_orders_are_explicit(self) -> None:
         self.assertEqual([EdgeOrder(8).chunk_id(i) for i in range(8)], [0, 7, 1, 6, 2, 5, 3, 4])
         self.assertEqual([CenterOrder(8).chunk_id(i) for i in range(8)], [3, 4, 2, 5, 1, 6, 0, 7])
+
+    def test_private_orders_are_seeded_and_non_affine(self) -> None:
+        size = 4093
+        first = [
+            PrivatePermutationOrder(size, "one").chunk_id(rank)
+            for rank in range(64)
+        ]
+        again = [
+            PrivatePermutationOrder(size, "one").chunk_id(rank)
+            for rank in range(64)
+        ]
+        second = [
+            PrivatePermutationOrder(size, "two").chunk_id(rank)
+            for rank in range(64)
+        ]
+        self.assertEqual(first, again)
+        self.assertNotEqual(first, second)
+        deltas = {
+            (first[index + 1] - first[index]) % size
+            for index in range(len(first) - 1)
+        }
+        self.assertGreater(len(deltas), 50)
 
 
 if __name__ == "__main__":

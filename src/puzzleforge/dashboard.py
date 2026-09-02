@@ -145,14 +145,17 @@ def create_dashboard_server(
             self._send(HTTPStatus.METHOD_NOT_ALLOWED, b"read only\n", "text/plain")
 
         def _send(self, status: HTTPStatus, body: bytes, content_type: str) -> None:
-            self.send_response(status.value)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'")
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(status.value)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'")
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                return
 
         def log_message(self, format: str, *args: object) -> None:
             return

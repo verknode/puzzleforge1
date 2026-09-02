@@ -13,7 +13,7 @@ of a key independently verified against a registered public-puzzle address.
 
 - dependency-free secp256k1 and compressed P2PKH reference implementation;
 - reviewed registry entries for puzzles #8 and #71–#74;
-- deterministic, non-overlapping, pseudo-random chunk allocation;
+- private-seeded cryptographic, non-overlapping chunk allocation;
 - parallel CPU reference scanner with resumable atomic checkpoints;
 - strict cuBitCrack/clBitCrack adapter with independent result verification;
 - local-first GPU profile with validation, auto-tuning, adaptive durable chunks,
@@ -71,6 +71,19 @@ Stop with Ctrl+C and start `local-run` again later. Completed chunks are never
 repeated, while an interrupted or failed chunk is returned to the retry queue.
 The measured flags are loaded automatically; they do not have to be copied
 into each command.
+
+New local campaigns receive a random 256-bit work-order seed. To replace an
+older public/default ordering while retaining every completed range, stop all
+workers and run:
+
+```bash
+puzzleforge local-reseed
+```
+
+The uniform fallback uses a keyed format-preserving Feistel permutation rather
+than a visible constant-stride affine walk. This reduces systematic overlap
+between independent installations; it does not create a cryptographic shortcut
+or change the probability represented by exact unique coverage.
 
 After setup, start computation and the dashboard together with one command:
 

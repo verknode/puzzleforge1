@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -492,6 +493,61 @@ class Coordinator:
             except BaseException:
                 connection.rollback()
                 raise
+
+    def reseed(self, seed: str) -> str:
+        """Start a new private work order without deleting durable work."""
+        if not seed or len(seed.encode("utf-8")) > 512:
+            raise ValueError("seed must contain 1-512 UTF-8 bytes")
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                campaign = self._load_campaign(connection)
+                if campaign["state"] != "running":
+                    raise CoordinatorError("only a running campaign can be reseeded")
+                live_leases = connection.execute(
+                    "SELECT COUNT(*) FROM work WHERE state = 'leased'"
+                ).fetchone()[0]
+                if live_leases:
+                    raise CoordinatorError(
+                        "stop all workers before changing the private work order"
+                    )
+                hypothesis = self._load_hypothesis(connection)
+                if not hypothesis["enabled"] and campaign["planner_mode"] == "affine":
+                    raise CoordinatorError(
+                        "enable Hypothesis Lab before reseeding an affine campaign"
+                    )
+                planner_state = (
+                    json.dumps(
+                        MosaicPlanner(campaign["total_chunks"], seed=seed).state(),
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    if campaign["planner_mode"] == "mosaic"
+                    else None
+                )
+                connection.execute(
+                    """
+                    UPDATE campaign
+                       SET seed = ?, planner_state = ?, updated_at = ?
+                     WHERE id = 1
+                    """,
+                    (seed, planner_state, now),
+                )
+                connection.execute(
+                    """
+                    UPDATE hypothesis_lab
+                       SET state_json = NULL, report_json = NULL,
+                           analyzed_at = NULL, updated_at = ?
+                     WHERE id = 1
+                    """,
+                    (now,),
+                )
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+        return hashlib.blake2b(seed.encode(), digest_size=8).hexdigest()
 
     @staticmethod
     def _plan(campaign: sqlite3.Row) -> ChunkPlan:

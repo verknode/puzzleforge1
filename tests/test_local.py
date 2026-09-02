@@ -10,6 +10,7 @@ from puzzleforge.cli import (
     command_generator_enable,
     command_hypothesis_enable,
     command_local_app,
+    command_local_reseed,
     command_local_sweep_configure,
 )
 from puzzleforge.coordinator import Coordinator
@@ -158,6 +159,52 @@ class LocalTests(unittest.TestCase):
         self.assertNotEqual(previous.chunk_id, next_lease.chunk_id)
         self.assertTrue(next_lease.strategy_lane.startswith("hypothesis:"))
         self.assertTrue(status["hypothesis_lab"]["enabled"])
+
+    def test_private_reseed_preserves_work_and_changes_future_order(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            profile = self.make_profile(directory)
+            profile_path = Path(directory) / "profile.json"
+            save_profile(profile_path, profile)
+            coordinator = Coordinator(Path(profile.database))
+            first = coordinator.lease("before-reseed", lease_seconds=60, now_epoch=1000)
+            coordinator.complete(
+                first.token,
+                first.worker,
+                checked=first.keys,
+                elapsed_seconds=1.0,
+                rate_keys_per_second=first.keys,
+                now_epoch=1001,
+            )
+            with redirect_stdout(io.StringIO()):
+                command_hypothesis_enable(Namespace(profile=profile_path))
+                result = command_local_reseed(
+                    Namespace(profile=profile_path, seed="private-test-seed")
+                )
+            updated = load_profile(profile_path)
+            second = coordinator.lease(
+                "after-reseed", lease_seconds=60, now_epoch=1002
+            )
+            status = coordinator.status(now_epoch=1003)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(updated.seed, "private-test-seed")
+        self.assertEqual(status["completed_chunks"], 1)
+        self.assertNotEqual(first.chunk_id, second.chunk_id)
+        self.assertTrue(second.strategy_lane.startswith("hypothesis:"))
+
+    def test_private_reseed_refuses_a_live_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            profile = self.make_profile(directory)
+            profile_path = Path(directory) / "profile.json"
+            save_profile(profile_path, profile)
+            coordinator = Coordinator(Path(profile.database))
+            coordinator.enable_hypothesis()
+            coordinator.lease("live-worker", lease_seconds=60, now_epoch=1000)
+            with self.assertRaisesRegex(RuntimeError, "stop all workers"):
+                command_local_reseed(
+                    Namespace(profile=profile_path, seed="must-not-apply")
+                )
+            self.assertEqual(load_profile(profile_path).seed, "local-tests")
 
     def test_existing_profile_can_enable_generator_lab_without_losing_work(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

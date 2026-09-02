@@ -372,6 +372,7 @@ def command_local_setup(args: argparse.Namespace) -> int:
         max_retries=args.thermal_retries,
     )
 
+    seed = args.seed or f"local-{secrets.token_hex(32)}"
     state_dir = args.state_dir.expanduser().resolve()
     profile_path = state_dir / "profile.json"
     database_path = state_dir / "campaign.sqlite3"
@@ -395,7 +396,7 @@ def command_local_setup(args: argparse.Namespace) -> int:
     report = run_benchmark(
         puzzle_number=args.puzzle,
         chunk_size=args.benchmark_chunk_size,
-        seed=args.seed,
+        seed=seed,
         sequence=0,
         repeats=args.repeats,
         profiles=tuning_profiles(args.benchmark_profile, args.device),
@@ -422,7 +423,7 @@ def command_local_setup(args: argparse.Namespace) -> int:
         database_path,
         puzzle_number=args.puzzle,
         chunk_size=chunk_size,
-        seed=args.seed,
+        seed=seed,
         planner_mode=args.mode,
     )
     profile = LocalProfile(
@@ -435,7 +436,7 @@ def command_local_setup(args: argparse.Namespace) -> int:
         chunk_size=chunk_size,
         target_chunk_seconds=args.chunk_seconds,
         planner_mode=args.mode,
-        seed=args.seed,
+        seed=seed,
         database=str(database_path),
         benchmark_report=str(benchmark_path),
         device_probe=device_probe,
@@ -464,6 +465,19 @@ def command_local_setup(args: argparse.Namespace) -> int:
 
 def command_local_run(args: argparse.Namespace) -> int:
     return _run_local_campaign(args)
+
+
+def command_local_reseed(args: argparse.Namespace) -> int:
+    from .coordinator import Coordinator
+    from .local import load_profile, save_profile
+
+    profile = load_profile(args.profile)
+    seed = args.seed or f"local-{secrets.token_hex(32)}"
+    fingerprint = Coordinator(Path(profile.database)).reseed(seed)
+    save_profile(args.profile, replace(profile, seed=seed))
+    print("Private work order changed; existing coverage retained.")
+    print(f"Seed fingerprint: {fingerprint}")
+    return 0
 
 
 def command_hypothesis_enable(args: argparse.Namespace) -> int:
@@ -1096,7 +1110,10 @@ def build_parser() -> argparse.ArgumentParser:
     local_setup_parser.add_argument(
         "--mode", choices=("affine", "mosaic", "hypothesis"), default="hypothesis"
     )
-    local_setup_parser.add_argument("--seed", default="puzzleforge-local-v1")
+    local_setup_parser.add_argument(
+        "--seed",
+        help="private work-order seed (random 256-bit value when omitted)",
+    )
     local_setup_parser.add_argument("--max-temp", type=float, default=82.0)
     local_setup_parser.add_argument("--resume-temp", type=float, default=72.0)
     local_setup_parser.add_argument(
@@ -1112,6 +1129,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_local_runtime_arguments(local_run_parser)
     local_run_parser.set_defaults(handler=command_local_run)
+
+    local_reseed_parser = subparsers.add_parser(
+        "local-reseed",
+        help="change the private work order without losing completed ranges",
+    )
+    local_reseed_parser.add_argument(
+        "--profile", type=Path, default=Path(".puzzleforge/local/profile.json")
+    )
+    local_reseed_parser.add_argument(
+        "--seed", help="explicit seed; omitted generates 256 random bits"
+    )
+    local_reseed_parser.set_defaults(handler=command_local_reseed)
 
     hypothesis_enable_parser = subparsers.add_parser(
         "hypothesis-enable",

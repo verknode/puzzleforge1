@@ -12,7 +12,7 @@ from .model_zoo import (
     analyze_model_zoo,
     model_density,
 )
-from .mosaic import AffineOrder
+from .mosaic import PrivatePermutationOrder
 
 
 DATASET_SOURCE = (
@@ -480,7 +480,10 @@ class HypothesisPlanner:
         cursor = self._cell_cursors.get(cursor_name, 0)
         if cursor >= size:
             return None
-        order = AffineOrder(size, f"{self.seed}/hypothesis/{model}/{cell}")
+        order = PrivatePermutationOrder(
+            size,
+            f"{self.seed}/hypothesis/{model}/{cell}",
+        )
         chunk_id = start + order.chunk_id(cursor)
         self._cell_cursors[cursor_name] = cursor + 1
         return chunk_id
@@ -490,7 +493,7 @@ class HypothesisPlanner:
         cursor = self._cell_cursors.get(cursor_name, 0)
         if cursor >= self.total_chunks:
             return None
-        order = AffineOrder(
+        order = PrivatePermutationOrder(
             self.total_chunks,
             f"{self.seed}/hypothesis/uniform-fallback",
         )
