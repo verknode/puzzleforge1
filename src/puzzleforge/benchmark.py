@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import platform
 import statistics
@@ -51,10 +52,16 @@ class BenchmarkReport:
     device_probe: str
     system: str
     results: tuple[TuningResult, ...]
+    warmup_runs: int = 0
+    maximum_relative_spread: float = 0.20
 
     @property
     def best(self) -> TuningResult | None:
-        valid = [result for result in self.results if result.successful_runs]
+        valid = [result for result in self.results
+                 if result.successful_runs == self.repeats and not result.failed_runs
+                 and math.isfinite(result.median_keys_per_second)
+                 and result.median_keys_per_second > 0
+                 and result.relative_spread <= self.maximum_relative_spread]
         if not valid:
             return None
         return max(
@@ -76,6 +83,9 @@ class BenchmarkReport:
             "chunk_end_hex": self.chunk_end_hex,
             "chunk_keys": self.chunk_keys,
             "repeats": self.repeats,
+            "warmup_runs": self.warmup_runs,
+            "maximum_relative_spread": self.maximum_relative_spread,
+            "measurement": "completed keys / total scan wall time (including initialization and cooling)",
             "binary_name": self.binary_name,
             "device_probe": self.device_probe,
             "system": self.system,
@@ -134,6 +144,9 @@ def run_benchmark(
     engine_factory: Callable[[EngineTuning], ScanEngine],
     binary_name: str,
     device_probe: str,
+    warmup_runs: int = 0,
+    progress: Callable[[str], None] | None = None,
+    validate_tuning: bool = False,
 ) -> BenchmarkReport:
     puzzle = get_puzzle(puzzle_number)
     if puzzle.status != "unsolved":
@@ -142,26 +155,43 @@ def run_benchmark(
         raise ValueError("repeats must be positive")
     if not profiles:
         raise ValueError("at least one tuning profile is required")
+    if not 0 <= warmup_runs <= 10:
+        raise ValueError("warmup_runs must be in [0, 10]")
     plan = ChunkPlan(puzzle=puzzle, chunk_size=chunk_size, seed=seed)
     chunk = plan.chunk_for_sequence(sequence)
     results: list[TuningResult] = []
 
-    for tuning in profiles:
-        rates: list[float] = []
-        total_elapsed = 0.0
-        errors: list[str] = []
-        for _ in range(repeats):
-            outcome = engine_factory(tuning).scan(puzzle, chunk)
-            total_elapsed += outcome.elapsed_seconds
-            if outcome.status == "found":
-                raise RuntimeError(
-                    "benchmark engine reported a verified match; stop benchmarking immediately"
-                )
-            if outcome.status != "complete" or outcome.checked != chunk.size:
-                errors.append(outcome.message or "engine did not complete the full range")
+    samples = {tuning: [] for tuning in profiles}
+    failures = {tuning: [] for tuning in profiles}
+    durations = {tuning: 0.0 for tuning in profiles}
+    # Interleave profiles so later settings do not get all of the hot-GPU runs.
+    for trial in range(warmup_runs + repeats):
+        order = profiles if trial % 2 == 0 else tuple(reversed(profiles))
+        for tuning in order:
+            if progress:
+                progress(f"{'Warmup' if trial < warmup_runs else 'Measured'} run {trial + 1}/{warmup_runs + repeats}: {tuning_flags(tuning)}")
+            try:
+                engine = engine_factory(tuning)
+                if validate_tuning and trial == 0:
+                    validate_known_puzzle(engine)
+                outcome = engine.scan(puzzle, chunk)
+            except (OSError, RuntimeError, ValueError) as exc:
+                failures[tuning].append(str(exc))
                 continue
-            rates.append(outcome.rate_keys_per_second)
+            if outcome.status == "found":
+                raise BenchmarkMatch(outcome.found_key)
+            if outcome.status != "complete" or outcome.checked != chunk.size:
+                failures[tuning].append(outcome.message or "engine did not complete the full range")
+                continue
+            if not math.isfinite(outcome.elapsed_seconds) or outcome.elapsed_seconds <= 0:
+                failures[tuning].append("invalid elapsed time")
+                continue
+            durations[tuning] += outcome.elapsed_seconds
+            if trial >= warmup_runs:
+                samples[tuning].append(outcome.checked / outcome.elapsed_seconds)
 
+    for tuning in profiles:
+        rates, errors, total_elapsed = samples[tuning], failures[tuning], durations[tuning]
         if rates:
             median = statistics.median(rates)
             minimum = min(rates)
@@ -192,7 +222,7 @@ def run_benchmark(
         reverse=True,
     )
     return BenchmarkReport(
-        schema=1,
+        schema=2,
         created_at=datetime.now(UTC).isoformat(),
         puzzle=puzzle.number,
         address=puzzle.address,
@@ -204,7 +234,14 @@ def run_benchmark(
         device_probe=device_probe,
         system=f"{platform.system()} {platform.release()} / {platform.machine()}",
         results=tuple(results),
+        warmup_runs=warmup_runs,
     )
+
+
+class BenchmarkMatch(RuntimeError):
+    def __init__(self, private_key):
+        self.private_key = private_key
+        super().__init__("Benchmark found a candidate; stop tuning and independently verify it.")
 
 
 def validate_known_puzzle(engine: BitCrackEngine) -> None:

@@ -3,7 +3,8 @@ param(
     # Empty means: create new campaigns as hypothesis, and leave an existing
     # campaign in whatever mode it is already running.
     [ValidateSet("", "hypothesis", "cold")]
-    [string]$Mode = ""
+    [string]$Mode = "",
+    [switch]$Tune
 )
 
 $ErrorActionPreference = "Stop"
@@ -55,7 +56,9 @@ if (-not (Test-Path $Profile)) {
     }
 }
 
-& $VenvPython -m puzzleforge generator-enable --cpu-percent 10
-if ($LASTEXITCODE -ne 0) { throw "Could not enable Generator Lab." }
+if ($Tune) {
+    & $VenvPython -m puzzleforge local-retune --profile $Profile
+    if ($LASTEXITCODE -ne 0) { throw "Retune did not complete; the prior tuning remains in place. See the report." }
+}
 
 & $VenvPython -m puzzleforge local-app

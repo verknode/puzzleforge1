@@ -13,6 +13,7 @@ from .generator_lab import generator_dashboard_status
 from .local import LocalProfile, load_profile
 from .sweep import load_sweep_record
 from .telemetry import TelemetryCache
+from .runtime import read_runtime
 
 
 def dashboard_payload(
@@ -20,6 +21,8 @@ def dashboard_payload(
     telemetry: dict[str, object],
 ) -> dict[str, object]:
     campaign = Coordinator(Path(profile.database)).status()
+    campaign.pop("seed", None)
+    campaign.pop("found_key_hex", None)
     checked = Decimal(campaign["checked_keys"])
     total = Decimal(campaign["total_keys"])
     with localcontext() as context:
@@ -83,6 +86,7 @@ def dashboard_payload(
             },
         },
         "campaign": campaign,
+        "runtime": read_runtime(Path(profile.database)),
         "generator_lab": generator_dashboard_status(
             profile.database,
             enabled=profile.generator_lab_enabled,
@@ -126,9 +130,11 @@ def create_dashboard_server(
                 return
             if path == "/api/range-map":
                 try:
-                    raw_bins = parse_qs(request.query).get("bins", ["4096"])[0]
+                    query = parse_qs(request.query)
+                    raw_bins = query.get("bins", ["4096"])[0]
                     payload = Coordinator(Path(profile.database)).range_map(
-                        bins=int(raw_bins)
+                        bins=int(raw_bins), first_chunk=int(query.get("first", ["0"])[0]),
+                        after_chunk=int(query["after"][0]) if "after" in query else None,
                     )
                     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
                     self._send(HTTPStatus.OK, body, "application/json")
@@ -192,19 +198,21 @@ main{width:min(1120px,100%);margin:auto;padding:28px 18px 48px}header{display:fl
 .map-head{display:flex;align-items:center;justify-content:space-between;gap:16px}.map-legend{display:flex;flex-wrap:wrap;gap:12px;color:var(--muted);font-size:11px}.map-legend span{display:flex;align-items:center;gap:5px}.swatch{width:8px;height:8px;border-radius:2px;background:#111820;border:1px solid #34414a}.swatch.done{background:var(--good);border-color:var(--good)}.swatch.active{background:var(--hot);border-color:var(--hot)}.swatch.retry{background:var(--bad);border-color:var(--bad)}.range-map{display:block;width:100%;height:260px;margin-top:14px;border:1px solid var(--line);border-radius:9px;background:#090c0f;cursor:crosshair;image-rendering:pixelated}.map-detail{min-height:21px;color:var(--muted);margin-top:9px;overflow-wrap:anywhere}.map-note{font-size:11px;color:#65727b;margin-top:4px}
 @media(max-width:760px){main{padding:20px 12px 40px}header{align-items:start}.card{grid-column:span 6}.wide{grid-column:1/-1}.value{font-size:28px}.map-head{align-items:start;flex-direction:column;gap:8px}.range-map{height:320px}}
 @media(max-width:420px){.card{grid-column:1/-1;min-height:112px}.brand{font-size:29px}}
+.swatch.partial{background:#206c4c;border-color:#206c4c}.map-controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px}.map-controls button{background:#172128;color:var(--text);border:1px solid #40515c;border-radius:7px;padding:8px 12px;font:inherit;cursor:pointer}.map-controls button:disabled{opacity:.35;cursor:default}.map-controls button:focus-visible{outline:2px solid var(--hot)}#mapDepth{color:var(--muted);font-size:12px}.row b{text-align:right;overflow-wrap:anywhere}
 </style>
 </head>
 <body><main>
 <header><div><div class="brand">PUZZLE<b>FORGE</b></div><div class="sub" id="gpuName">LOCAL GPU / CONNECTING</div></div><div class="state"><i class="dot" id="dot"></i><span id="state">CONNECTING</span></div></header>
 <section class="grid">
-<article class="card"><div class="label">Speed</div><div class="value" id="speed">—</div><div class="meta">measured keys / second</div></article>
+<article class="card"><div class="label">Live engine speed</div><div class="value" id="speed">—</div><div class="meta" id="speedNote">waiting for engine report</div></article>
 <article class="card"><div class="label">GPU load</div><div class="value"><span id="load">—</span><span class="unit">%</span></div><div class="bar"><div class="fill" id="loadBar"></div></div></article>
 <article class="card"><div class="label">Temperature</div><div class="value"><span id="temp">—</span><span class="unit">°C</span></div><div class="meta" id="clock">telemetry pending</div></article>
 <article class="card"><div class="label">Power</div><div class="value"><span id="power">—</span><span class="unit">W</span></div><div class="meta" id="powerLimit">limit —</div></article>
 <article class="card wide"><div class="label">Exact unique coverage</div><div class="value" id="coverage">—</div><div class="bar"><div class="fill" id="coverageBar"></div></div><div class="meta" id="checked">— checked</div></article>
 <article class="card wide"><div class="label">Campaign</div><div class="row"><span>Puzzle</span><b id="puzzle">—</b></div><div class="row"><span>Mode</span><b id="mode">—</b></div><div class="row"><span>Completed chunks</span><b id="chunks">—</b></div><div class="row"><span>Failures / retries</span><b id="failures">—</b></div></article>
-<article class="card full"><div class="map-head"><div class="label">Keyspace map / low → high</div><div class="map-legend"><span><i class="swatch done"></i>checked</span><span><i class="swatch active"></i>active</span><span><i class="swatch retry"></i>retry</span><span><i class="swatch"></i>untouched</span></div></div><canvas class="range-map" id="rangeMap"></canvas><div class="map-detail" id="rangeMapDetail">Loading range positions…</div><div class="map-note">A lit cell contains one or more chunks; it does not mean the entire coarse cell was checked. Tap a cell for its exact key range.</div></article>
-<article class="card full"><div class="label">Hypothesis Lab / Model Zoo</div><div class="row"><span>Cycle</span><b id="labCycle">—</b></div><div class="row"><span>Research / GPU search</span><b id="labRatio">—</b></div><div class="row"><span>Models / eligible / shadow</span><b id="labCounts">—</b></div><div class="row"><span>Best eligible candidate</span><b id="labCandidate">—</b></div><div class="row"><span>Selected model</span><b id="labModel">—</b></div><div class="row"><span>Empirical evidence gate</span><b id="labEvidence">—</b></div></article>
+<article class="card full"><div class="label">Useful throughput / current session</div><div class="row"><span>Confirmed unique keys / second</span><b id="effectiveRate">—</b></div><div class="row"><span>Last completed chunk / elapsed</span><b id="lastChunkRate">—</b></div><div class="row"><span>Saved benchmark / keys per second</span><b id="savedRate">—</b></div><div class="row"><span>Worker heartbeat / engine report age</span><b id="workerAge">—</b></div><div class="row"><span>Last completed range</span><b id="lastComplete">—</b></div><div class="row"><span>Time to first engine report / thermal retries</span><b id="startupTime">—</b></div><div class="map-note">Unique throughput credits completed chunks only. It includes planning, process startup and cooling; early values jump until several chunks finish.</div></article>
+<article class="card full"><div class="map-head"><div class="label">Keyspace map / low → high</div><div class="map-legend"><span><i class="swatch partial"></i>partly checked</span><span><i class="swatch done"></i>fully checked</span><span><i class="swatch active"></i>active</span><span><i class="swatch retry"></i>retry</span><span><i class="swatch"></i>untouched</span></div></div><div class="map-controls"><button id="mapBack" disabled>Back</button><button id="mapReset">Whole range</button><button id="mapZoom" disabled>Zoom selected cell</button><span id="mapDepth">Overview</span></div><canvas class="range-map" id="rangeMap" aria-label="Keyspace coverage map"></canvas><div class="map-detail" id="rangeMapSummary">Loading range positions…</div><div class="map-detail" id="rangeMapDetail">Select a cell to inspect it.</div><div class="map-note">Colors stay fixed: dark green = partially checked, bright green = the entire cell checked. Select a cell and zoom to inspect individual chunks. No history from other searchers is available.</div></article>
+<article class="card full"><div class="label">Hypothesis Lab / Model Zoo</div><div class="row"><span>Cycle</span><b id="labCycle">—</b></div><div class="row"><span>Analysis cadence (CPU)</span><b id="labRatio">—</b></div><div class="row"><span>Models / eligible / shadow</span><b id="labCounts">—</b></div><div class="row"><span>Best eligible candidate</span><b id="labCandidate">—</b></div><div class="row"><span>Selected model</span><b id="labModel">—</b></div><div class="row"><span>Empirical evidence gate</span><b id="labEvidence">—</b></div><div class="map-note">Identical model inputs reuse the analysis in this process. This is not a GPU time reservation or a promise of a search advantage.</div></article>
 <article class="card full"><div class="label">Generator Lab / public-puzzle seed research</div><div class="row"><span>Status</span><b id="genStatus">—</b></div><div class="row"><span>CPU duty / GPU reserved</span><b id="genDuty">—</b></div><div class="row"><span>Generator candidates / completed seeds</span><b id="genCounts">—</b></div><div class="row"><span>Current source</span><b id="genSource">—</b></div><div class="row"><span>Current scheme</span><b id="genScheme">—</b></div><div class="row"><span>Best control match (diagnostic only)</span><b id="genBits">—</b></div><div class="row"><span>Exact validated generators</span><b id="genValidated">—</b></div></article>
 <article class="card full"><div class="label">Local profile</div><div class="row"><span>24h coverage at benchmark speed</span><b id="day">—</b></div><div class="row"><span>Durable chunk target</span><b id="chunkTarget">—</b></div><div class="row"><span>Configured thermal policy</span><b id="thermalGuard">—</b></div><div class="row"><span>GPU memory</span><b id="memory">—</b></div><div class="row"><span>Last update</span><b id="updated">—</b></div><div class="meta error" id="error"></div></article>
 <article class="card full"><div class="label">Verified-match auto-sweep</div><div class="row"><span>Status</span><b id="sweepState">—</b></div><div class="row"><span>Destination</span><b id="sweepAddress">—</b></div><div class="row"><span>Transaction</span><b id="sweepTxid">—</b></div><div class="row"><span>Amount / fee</span><b id="sweepAmount">—</b></div></article>
@@ -225,18 +233,29 @@ const pct = value => {
   ) + '%';
 };
 let rangeMapData = null;
+let mapWindow = null, mapHistory = [], selectedCell = null, mapRequest = 0, statusBusy = false;
 
 const sparseCounts = values => new Map((values || []).map(value => [value[0], value[1]]));
 const hex = value => value.toString(16).padStart(18, '0');
+
+function cellRange(index) {
+  const data = rangeMapData;
+  const span = BigInt(data.bucket_span_chunks), limit = BigInt(data.window_after_chunk);
+  const first = BigInt(data.window_first_chunk) + BigInt(index) * span;
+  const after = first + span < limit ? first + span : limit;
+  const start = BigInt('0x' + data.start_hex) + first * BigInt(data.chunk_size);
+  const end = BigInt('0x' + data.start_hex) + after * BigInt(data.chunk_size) - 1n;
+  return {first, after, start, end: end < BigInt('0x' + data.end_hex) ? end : BigInt('0x' + data.end_hex)};
+}
 
 function renderRangeMap() {
   if (!rangeMapData) return;
   const canvas = $('rangeMap');
   const bounds = canvas.getBoundingClientRect();
   const width = Math.max(280, Math.floor(bounds.width));
-  const columns = width < 620 ? 64 : 128;
+  const columns = Math.min(rangeMapData.bins, width < 620 ? 64 : 128);
   const rows = Math.ceil(rangeMapData.bins / columns);
-  const cell = width / columns;
+  const cell = Math.min(32, width / columns);
   const height = Math.max(1, rows * cell);
   const ratio = Math.max(1, window.devicePixelRatio || 1);
   canvas.width = Math.round(width * ratio);
@@ -250,7 +269,7 @@ function renderRangeMap() {
   const completed = sparseCounts(rangeMapData.states.completed);
   const active = sparseCounts(rangeMapData.states.active);
   const retry = sparseCounts(rangeMapData.states.retry);
-  const maximum = Math.max(1, ...completed.values());
+  const coverage = sparseCounts(rangeMapData.coverage);
   const gap = cell >= 6 ? 1 : .55;
   for (let index = 0; index < rangeMapData.bins; index += 1) {
     const x = (index % columns) * cell;
@@ -261,19 +280,28 @@ function renderRangeMap() {
     } else if (retry.has(index)) {
       context.fillStyle = '#ff5d64';
     } else if (doneCount) {
-      const alpha = .45 + .55 * Math.log1p(doneCount) / Math.log1p(maximum);
-      context.fillStyle = `rgba(69,224,138,${alpha})`;
+      const range = cellRange(index);
+      const checked = BigInt(coverage.get(index) || '0');
+      context.fillStyle = checked === range.end - range.start + 1n ? '#45e08a' : '#206c4c';
     } else {
       context.fillStyle = '#111820';
     }
     context.fillRect(x + gap / 2, y + gap / 2, cell - gap, cell - gap);
+    if (selectedCell === index) {
+      context.strokeStyle = '#fff';
+      context.lineWidth = 1;
+      context.strokeRect(x + .5, y + .5, cell - 1, cell - 1);
+    }
   }
-  canvas._rangeLayout = {columns, rows, cell, completed, active, retry};
+  canvas._rangeLayout = {columns, rows, cell, completed, active, retry, coverage};
 
   const done = (rangeMapData.states.completed || []).reduce((sum, item) => sum + item[1], 0);
   const touched = completed.size;
-  $('rangeMapDetail').textContent = `${done.toLocaleString()} completed chunks across ` +
+  $('rangeMapSummary').textContent = `${done.toLocaleString()} completed chunks across ` +
     `${touched.toLocaleString()} of ${rangeMapData.bins.toLocaleString()} display cells`;
+  $('mapBack').disabled = mapHistory.length === 0;
+  $('mapDepth').textContent = mapHistory.length ? `Zoom ${mapHistory.length} · ${rangeMapData.bucket_span_chunks} chunks/cell` : 'Overview';
+  if (selectedCell !== null) describeCell(selectedCell);
 }
 
 function showRangeMapCell(event) {
@@ -285,40 +313,54 @@ function showRangeMapCell(event) {
   const column = Math.floor((event.clientX - bounds.left) / layout.cell);
   const row = Math.floor((event.clientY - bounds.top) / layout.cell);
   const index = row * layout.columns + column;
-  if (index < 0 || index >= rangeMapData.bins) return;
+  if (column < 0 || column >= layout.columns || index < 0 || index >= rangeMapData.bins) return;
+  selectedCell = index;
+  renderRangeMap();
+}
 
-  const totalChunks = BigInt(rangeMapData.total_chunks);
-  const span = BigInt(rangeMapData.bucket_span_chunks);
-  const chunkSize = BigInt(rangeMapData.chunk_size);
-  const puzzleStart = BigInt('0x' + rangeMapData.start_hex);
-  const puzzleEnd = BigInt('0x' + rangeMapData.end_hex);
-  const firstChunk = BigInt(index) * span;
-  const afterLast = firstChunk + span < totalChunks ? firstChunk + span : totalChunks;
-  const keyStart = puzzleStart + firstChunk * chunkSize;
-  const calculatedEnd = puzzleStart + afterLast * chunkSize - 1n;
-  const keyEnd = calculatedEnd < puzzleEnd ? calculatedEnd : puzzleEnd;
+function describeCell(index) {
+  const layout = $('rangeMap')._rangeLayout;
+  const range = cellRange(index);
   const done = layout.completed.get(index) || 0;
   const active = layout.active.get(index) || 0;
   const retry = layout.retry.get(index) || 0;
-  $('rangeMapDetail').textContent = `0x${hex(keyStart)} – 0x${hex(keyEnd)} · ` +
-    `checked ${done} · active ${active} · retry ${retry}`;
+  const checked = BigInt(layout.coverage.get(index) || '0');
+  const size = range.end - range.start + 1n;
+  $('rangeMapDetail').textContent = `0x${hex(range.start)} – 0x${hex(range.end)} · ` +
+    `${checked.toLocaleString()} / ${size.toLocaleString()} keys (${pct(Number(checked) / Number(size) * 100)}) · ` +
+    `${done} completed · ${active} active · ${retry} retry`;
+  $('mapZoom').disabled = range.after - range.first <= 1n;
+}
+
+function setMapWindow(value) {
+  mapWindow = value;
+  selectedCell = null;
+  rangeMapData = null;
+  $('mapZoom').disabled = true;
+  $('rangeMapDetail').textContent = 'Select a cell to inspect it.';
+  refreshRangeMap();
 }
 
 async function refreshRangeMap() {
+  const request = ++mapRequest;
   try {
-    const response = await fetch('/api/range-map?bins=4096', {cache: 'no-store'});
+    const url = '/api/range-map?bins=4096' + (mapWindow ? `&first=${mapWindow.first}&after=${mapWindow.after}` : '');
+    const response = await fetch(url, {cache: 'no-store', signal: AbortSignal.timeout(10000)});
     const data = await response.json();
     if (!response.ok) throw Error(data.error || response.status);
+    if (request !== mapRequest) return;
     rangeMapData = data;
     renderRangeMap();
   } catch (error) {
-    $('rangeMapDetail').textContent = 'Range map unavailable: ' + error.message;
+    if (request === mapRequest) $('rangeMapSummary').textContent = 'Range map unavailable: ' + error.message;
   }
 }
 
 async function refresh() {
+  if (statusBusy) return;
+  statusBusy = true;
   try {
-    const response = await fetch('/api/status', {cache: 'no-store'});
+    const response = await fetch('/api/status', {cache: 'no-store', signal: AbortSignal.timeout(10000)});
     const data = await response.json();
     if (!response.ok) throw Error(data.error || response.status);
 
@@ -333,12 +375,23 @@ async function refresh() {
     );
     const generator = data.generator_lab || {};
     const sweep = data.sweep || {};
+    const runtime = data.runtime || {};
 
-    $('state').textContent = campaign.state;
-    $('dot').style.background = campaign.state === 'running'
+    const phase = campaign.state === 'running' ? (runtime.phase || 'unknown') : campaign.state;
+    $('state').textContent = phase === 'unknown' ? 'WORKER UNKNOWN' : phase;
+    $('dot').style.background = phase === 'scanning'
       ? 'var(--good)'
-      : campaign.state === 'found' ? 'var(--hot)' : 'var(--muted)';
-    $('speed').textContent = fmt(local.measured_rate_keys_per_second);
+      : phase === 'found' || phase === 'cooling' ? 'var(--hot)' : 'var(--muted)';
+    $('dot').style.boxShadow = 'none';
+    $('speed').textContent = runtime.reported_rate_keys_per_second == null ? '—' : fmt(runtime.reported_rate_keys_per_second);
+    $('speedNote').textContent = runtime.reported_rate_keys_per_second == null ? 'No fresh engine rate' : 'engine-reported keys / second';
+    $('effectiveRate').textContent = runtime.completed_chunks ? fmt(runtime.session_rate_keys_per_second) : 'waiting for completed chunk';
+    $('lastChunkRate').textContent = runtime.last_chunk_seconds ? `${fmt(runtime.last_chunk_rate_keys_per_second)} keys/s / ${num(runtime.last_chunk_seconds).toFixed(1)} s` : '—';
+    $('savedRate').textContent = fmt(local.measured_rate_keys_per_second);
+    const age = value => value == null ? '—' : `${Math.round(value)} s`;
+    $('workerAge').textContent = `${age(runtime.heartbeat_age_seconds)} / ${age(runtime.rate_age_seconds)}`;
+    $('lastComplete').textContent = runtime.last_completed_at_epoch ? new Date(runtime.last_completed_at_epoch * 1000).toLocaleString() : 'none this session';
+    $('startupTime').textContent = `${age(runtime.first_rate_seconds)} / ${runtime.thermal_retries || 0}`;
     $('coverage').textContent = pct(derived.coverage_percent);
     $('coverageBar').style.width = Math.min(100, num(derived.coverage_percent)) + '%';
     $('checked').textContent = fmt(num(campaign.checked_keys)) + ' / ' +
@@ -356,7 +409,7 @@ async function refresh() {
 
     $('labCycle').textContent = hypothesis.enabled ? hypothesis.cycle : 'OFF';
     $('labRatio').textContent = hypothesis.enabled
-      ? hypothesis.research_percent + '% / ' + hypothesis.search_percent + '%'
+      ? '1 analysis / ' + (report.search_slots || Math.round(hypothesis.search_percent / hypothesis.research_percent)) + ' GPU chunks'
       : '—';
     $('labCounts').textContent = report.model_count !== undefined
       ? report.model_count + ' / ' + report.eligible_model_count + ' / ' +
@@ -400,8 +453,8 @@ async function refresh() {
       $('loadBar').style.width = Math.min(100, num(telemetry.utilization_percent)) + '%';
       $('temp').textContent = Math.round(num(telemetry.temperature_c));
       $('power').textContent = num(telemetry.power_w).toFixed(0);
-      $('powerLimit').textContent = 'limit ' +
-        num(telemetry.power_limit_w).toFixed(0) + ' W';
+      $('powerLimit').textContent = num(telemetry.power_limit_w) > 0 ? 'limit ' +
+        num(telemetry.power_limit_w).toFixed(0) + ' W' : 'limit not reported';
       $('clock').textContent = fmt(num(telemetry.sm_clock_mhz)) + ' MHz';
       $('memory').textContent = fmt(num(telemetry.memory_used_mib)) + ' / ' +
         fmt(num(telemetry.memory_total_mib)) + ' MiB';
@@ -413,8 +466,12 @@ async function refresh() {
     }
   } catch (error) {
     $('state').textContent = 'OFFLINE';
+    $('speed').textContent = '—';
+    $('speedNote').textContent = 'Dashboard disconnected';
     $('dot').style.background = 'var(--bad)';
     $('error').textContent = error.message;
+  } finally {
+    statusBusy = false;
   }
 }
 
@@ -422,6 +479,15 @@ refresh();
 refreshRangeMap();
 setInterval(refresh, 3000);
 $('rangeMap').addEventListener('click', showRangeMapCell);
+$('mapZoom').addEventListener('click', () => {
+  if (selectedCell === null || !rangeMapData) return;
+  const range = cellRange(selectedCell);
+  if (range.after - range.first <= 1n) return;
+  mapHistory.push(mapWindow);
+  setMapWindow({first: range.first.toString(), after: range.after.toString()});
+});
+$('mapBack').addEventListener('click', () => { if (mapHistory.length) setMapWindow(mapHistory.pop()); });
+$('mapReset').addEventListener('click', () => { mapHistory = []; setMapWindow(null); });
 window.addEventListener('resize', renderRangeMap);
 setInterval(refreshRangeMap, 15000);
 </script></body></html>""".encode("utf-8")

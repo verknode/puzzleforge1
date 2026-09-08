@@ -1226,7 +1226,8 @@ class Coordinator:
                     connection.rollback()
                 raise
 
-    def range_map(self, *, bins: int = 4096) -> dict[str, Any]:
+    def range_map(self, *, bins: int = 4096, first_chunk: int = 0,
+                  after_chunk: int | None = None) -> dict[str, Any]:
         """Return a sparse, coarse map of allocated chunks across the keyspace.
 
         A map cell represents a contiguous group of chunk ids.  Sparse state
@@ -1245,18 +1246,28 @@ class Coordinator:
         with self._connect() as connection:
             campaign = self._load_campaign(connection)
             total_chunks = int(campaign["total_chunks"])
-            actual_bins = min(bins, total_chunks)
-            bucket_span = (total_chunks + actual_bins - 1) // actual_bins
+            after_chunk = total_chunks if after_chunk is None else after_chunk
+            if (isinstance(first_chunk, bool) or isinstance(after_chunk, bool)
+                    or not isinstance(first_chunk, int) or not isinstance(after_chunk, int)
+                    or not 0 <= first_chunk < after_chunk <= total_chunks):
+                raise ValueError("range-map window is outside the campaign")
+            width = after_chunk - first_chunk
+            bucket_span = (width + min(bins, width) - 1) // min(bins, width)
+            actual_bins = (width + bucket_span - 1) // bucket_span
             rows = connection.execute(
                 """
-                SELECT CAST(chunk_id / ? AS INTEGER) AS bucket,
+                SELECT CAST((chunk_id - ?) / ? AS INTEGER) AS bucket,
                        state,
-                       COUNT(*) AS count
+                       COUNT(*) AS count,
+                       SUM(CASE WHEN result_checked = size THEN 1 ELSE 0 END) AS full_count,
+                       SUM(CASE WHEN result_checked < size THEN result_checked ELSE 0 END) AS partial_keys,
+                       MAX(CASE WHEN chunk_id = ? AND result_checked = size THEN ? - size ELSE 0 END) AS shortfall
                   FROM work
+                 WHERE chunk_id >= ? AND chunk_id < ?
                  GROUP BY bucket, state
                  ORDER BY bucket, state
                 """,
-                (bucket_span,),
+                (first_chunk, bucket_span, total_chunks - 1, campaign["chunk_size"], first_chunk, after_chunk),
             ).fetchall()
 
         states: dict[str, list[list[int]]] = {
@@ -1269,13 +1280,17 @@ class Coordinator:
             "leased": "active",
             "available": "retry",
         }
+        coverage = []
         for row in rows:
             states[state_names[row["state"]]].append(
                 [int(row["bucket"]), int(row["count"])]
             )
+            if row["state"] == "completed":
+                keys = int(row["full_count"]) * int(campaign["chunk_size"]) - int(row["shortfall"]) + int(row["partial_keys"])
+                coverage.append([int(row["bucket"]), str(keys)])
 
         return {
-            "schema": 1,
+            "schema": 2,
             "puzzle": int(campaign["puzzle"]),
             "start_hex": str(campaign["start_hex"]),
             "end_hex": str(campaign["end_hex"]),
@@ -1283,6 +1298,9 @@ class Coordinator:
             "total_chunks": str(total_chunks),
             "bins": actual_bins,
             "bucket_span_chunks": str(bucket_span),
+            "window_first_chunk": str(first_chunk),
+            "window_after_chunk": str(after_chunk),
+            "coverage": coverage,
             "checked_keys": str(campaign["checked_keys"]),
             "states": states,
             "updated_at": str(campaign["updated_at"]),

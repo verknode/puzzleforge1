@@ -537,6 +537,56 @@ def command_local_run(args: argparse.Namespace) -> int:
     return _run_local_campaign(args)
 
 
+def command_local_retune(args: argparse.Namespace) -> int:
+    from .benchmark import BenchmarkMatch, run_benchmark, tuning_profiles
+    from .coordinator import Coordinator
+    from .local import engine_from_profile, load_profile, resume_pending_sweep
+    from .retune import apply_retune
+    from .runtime import RuntimeMonitor, campaign_gpu_lock
+
+    if not 10 <= args.seconds <= 120 or args.repeats < 2:
+        raise ValueError("retune requires 10-120 seconds per trial and at least two repeats")
+    profile = load_profile(args.profile)
+    database = Path(profile.database)
+    with campaign_gpu_lock(database), RuntimeMonitor(database) as runtime:
+        coordinator = Coordinator(database)
+        status = coordinator.status()
+        if status["active_leases"] or status["state"] != "running":
+            raise RuntimeError("Retune requires a running campaign with no active leases. Stop its workers first.")
+        profiles = tuple(dict.fromkeys((profile.tuning,) + tuning_profiles(args.presets, profile.tuning.device)))
+        # Separate calibration ranges; never change the campaign's chunk grid or credit test work.
+        chunk_size = max(1 << 20, min(1 << 40, int(profile.measured_rate_keys_per_second * args.seconds)))
+        chunk_size = (chunk_size // (1 << 20)) * (1 << 20)
+        print(f"Retune: {len(profiles)} settings, one warmup + {args.repeats} measured trials each.", flush=True)
+        print("Scan wall time includes initialization and cooling. Existing search progress is retained.", flush=True)
+        try:
+            report = run_benchmark(
+                puzzle_number=profile.puzzle, chunk_size=chunk_size,
+                seed=f"retune-{secrets.token_hex(32)}", sequence=0,
+                repeats=args.repeats, profiles=profiles, warmup_runs=1,
+                validate_tuning=True, progress=lambda message: print(message, flush=True),
+                engine_factory=lambda tuning: engine_from_profile(
+                    replace(profile, tuning=tuning), timeout_seconds=max(120, args.seconds * 4),
+                    progress=runtime.progress,
+                ), binary_name=Path(profile.binary).name, device_probe=profile.device_probe,
+            )
+        except BenchmarkMatch as match:
+            if match.private_key is None:
+                raise RuntimeError("Benchmark reported a match without a key") from match
+            coordinator.record_verified_candidate(f"{match.private_key:064x}")
+            runtime.phase("found")
+            receipt = resume_pending_sweep(profile)
+            print("MATCH VERIFIED and recorded locally. Retune stopped.")
+            if receipt:
+                print(f"Auto-sweep: {receipt.detail}")
+            return 0
+        report_path = database.with_name(f"retune-{time.strftime('%Y%m%d-%H%M%S')}.json")
+        result = apply_retune(args.profile, report, report_path)
+        print(json.dumps(result, indent=2))
+        print(f"Report: {report_path}")
+        return 0 if result["applied"] else 1
+
+
 def command_local_reseed(args: argparse.Namespace) -> int:
     from .coordinator import Coordinator
     from .local import load_profile, save_profile
@@ -656,6 +706,15 @@ def command_local_sweep_configure(args: argparse.Namespace) -> int:
 
 
 def _run_local_campaign(args: argparse.Namespace) -> int:
+    from .local import load_profile
+    from .runtime import RuntimeMonitor, campaign_gpu_lock
+
+    database = Path(load_profile(args.profile).database)
+    with campaign_gpu_lock(database), RuntimeMonitor(database) as runtime:
+        return _run_locked_campaign(args, runtime)
+
+
+def _run_locked_campaign(args: argparse.Namespace, runtime) -> int:
     from .coordinator import Coordinator
     from .local import (
         engine_from_profile,
@@ -673,6 +732,7 @@ def _run_local_campaign(args: argparse.Namespace) -> int:
         )
     campaign_status = coordinator.status()
     if campaign_status["state"] == "found":
+        runtime.phase("found")
         receipt = resume_pending_sweep(profile)
         if receipt is not None and receipt.broadcast:
             print(f"AUTO-SWEEP BROADCAST txid={receipt.txid}")
@@ -686,6 +746,7 @@ def _run_local_campaign(args: argparse.Namespace) -> int:
         profile,
         timeout_seconds=args.engine_timeout,
         thermal_guard=not args.no_thermal_guard,
+        progress=runtime.progress,
     )
     generator_worker = None
     if profile.generator_lab_enabled:
@@ -698,6 +759,7 @@ def _run_local_campaign(args: argparse.Namespace) -> int:
         )
         existing_key = generator_lab.found_key()
         if existing_key is not None:
+            runtime.phase("found")
             return _finish_generator_match(profile, existing_key, coordinator)
         generator_worker = GeneratorLabWorker(
             generator_lab,
@@ -712,6 +774,7 @@ def _run_local_campaign(args: argparse.Namespace) -> int:
                 engine,
                 worker=args.worker,
                 lease_seconds=args.lease_seconds,
+                runtime=runtime,
             )
             print(result.message, flush=True)
             if result.found:
@@ -719,6 +782,7 @@ def _run_local_campaign(args: argparse.Namespace) -> int:
             if generator_worker is not None:
                 generator_key = generator_worker.found_key()
                 if generator_key is not None:
+                    runtime.phase("found")
                     return _finish_generator_match(
                         profile,
                         generator_key,
@@ -728,7 +792,9 @@ def _run_local_campaign(args: argparse.Namespace) -> int:
                 completed += 1
                 continue
             if result.outcome == "idle":
+                runtime.phase("idle")
                 return 0
+            runtime.phase("error")
             return 1
     except KeyboardInterrupt:
         print("Local run stopped; unfinished work was returned to the queue.")
@@ -1239,6 +1305,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_local_runtime_arguments(local_run_parser)
     local_run_parser.set_defaults(handler=command_local_run)
+
+    retune_parser = subparsers.add_parser("local-retune", help="measure stable GPU tuning while preserving the campaign")
+    retune_parser.add_argument("--profile", type=Path, default=Path(".puzzleforge/local/profile.json"))
+    retune_parser.add_argument("--presets", choices=("quick", "balanced", "full"), default="quick")
+    retune_parser.add_argument("--seconds", type=positive_integer, default=30)
+    retune_parser.add_argument("--repeats", type=positive_integer, default=3)
+    retune_parser.set_defaults(handler=command_local_retune)
 
     local_reseed_parser = subparsers.add_parser(
         "local-reseed",

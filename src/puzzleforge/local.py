@@ -322,6 +322,7 @@ def engine_from_profile(
     *,
     timeout_seconds: float | None = None,
     thermal_guard: bool = True,
+    progress=None,
 ) -> LocalEngine:
     abort_event = threading.Event() if thermal_guard else None
     engine = BitCrackEngine(
@@ -329,6 +330,7 @@ def engine_from_profile(
         profile.tuning,
         timeout_seconds=timeout_seconds,
         abort_event=abort_event,
+        progress=progress,
     )
     if not thermal_guard:
         return engine
@@ -345,6 +347,7 @@ def engine_from_profile(
             poll_seconds=profile.thermal_poll_seconds,
             max_retries=profile.thermal_max_retries,
         ),
+        progress=progress,
     )
 
 
@@ -355,8 +358,11 @@ def run_local_once(
     worker: str,
     lease_seconds: int = 3_600,
     sweep_network: SweepNetwork | None = None,
+    runtime=None,
 ) -> LocalRun:
     coordinator = Coordinator(Path(profile.database))
+    if runtime is not None:
+        runtime.phase("planning")
     lease = coordinator.lease(worker, lease_seconds=lease_seconds)
     if lease is None:
         state = coordinator.status()["state"]
@@ -386,6 +392,8 @@ def run_local_once(
     )
     heartbeat.start()
     try:
+        if runtime is not None:
+            runtime.begin_chunk(lease.chunk)
         outcome = engine.scan(puzzle, lease.chunk)
     except BaseException:
         stopped.set()
@@ -407,6 +415,8 @@ def run_local_once(
 
     if outcome.status == "error":
         coordinator.fail(lease.token, lease.worker, error=outcome.message)
+        if runtime is not None:
+            runtime.phase("error")
         return LocalRun("error", outcome.message)
 
     completion = coordinator.complete(
@@ -419,6 +429,8 @@ def run_local_once(
         elapsed_seconds=outcome.elapsed_seconds,
         rate_keys_per_second=outcome.rate_keys_per_second,
     )
+    if runtime is not None:
+        runtime.complete(outcome)
     sweep: SweepReceipt | None = None
     if completion.found and outcome.found_key is not None and profile.auto_sweep_enabled:
         sweep = _attempt_sweep(profile, outcome.found_key, coordinator, sweep_network)

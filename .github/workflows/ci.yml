@@ -21,3 +21,10 @@ jobs:
       - run: python -m pip install -e .
       - run: python -m unittest discover -s tests -v
 
+  windows-updater:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify Windows PowerShell 5.1 updater
+        shell: powershell
+        run: ./tests/check-powershell.ps1
