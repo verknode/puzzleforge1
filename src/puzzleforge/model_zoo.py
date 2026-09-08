@@ -477,6 +477,14 @@ def analyze_model_zoo(
     calibration_trials: int = DEFAULT_CALIBRATION_TRIALS,
     score_limit: int = REPORT_SCORE_LIMIT,
 ) -> ModelZooAnalysis:
+    # Callers receive their own parameter dicts; no mutable cached report escapes.
+    import copy
+    return copy.deepcopy(_cached_analysis(tuple(values), calibration_trials, score_limit))
+
+
+@lru_cache(maxsize=8)
+def _cached_analysis(values: tuple[float, ...], calibration_trials: int,
+                     score_limit: int) -> ModelZooAnalysis:
     if len(values) <= MIN_TRAINING_OBSERVATIONS:
         raise ValueError("not enough observations for Model Zoo")
     if calibration_trials < 19:

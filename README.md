@@ -97,7 +97,8 @@ puzzleforge local-app
 On Windows, `Start-PuzzleForge.cmd` creates/updates the local environment,
 performs first setup when `cuBitCrack.exe` is present, starts the campaign, and
 opens the dashboard. A new profile is created in Hypothesis Lab mode and
-Generator Lab is enabled for every profile. An existing campaign keeps the mode
+Generator Lab is enabled for new profiles. Existing profiles retain their saved
+Generator Lab settings. An existing campaign keeps the mode
 it is already running: a plain double-click never overrides that choice. Pass a
 mode to change it, which switches the running campaign without losing any
 completed range:
@@ -108,6 +109,12 @@ Start-PuzzleForge.cmd -Mode hypothesis
 ```
 
 Subsequent launches resume both durable campaign cursors.
+
+The dashboard separates fresh engine speed from confirmed unique throughput,
+shows worker liveness, and supports zooming the keyspace map down to individual
+chunks. Stop the worker and use `Tune-PuzzleForge.cmd` to compare sustained GPU
+settings without resetting progress. See [live performance and retuning](docs/LIVE_PERFORMANCE.md)
+for measurement definitions, completion checks, and the pinned Windows updater.
 
 ### Arm a verified-match sweep
 

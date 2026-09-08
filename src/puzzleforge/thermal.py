@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
 
 from .engine import EngineOutcome
@@ -46,6 +46,7 @@ class ThermalGuardedEngine:
         policy: ThermalPolicy | None = None,
         snapshot: Callable[[int | None], dict[str, object]] = nvidia_snapshot,
         sleep: Callable[[float], None] = time.sleep,
+        progress=None,
     ) -> None:
         self.engine = engine
         self.abort_event = abort_event
@@ -54,15 +55,17 @@ class ThermalGuardedEngine:
         self.snapshot = snapshot
         self.sleep = sleep
         self._cooling_required = False
+        self.progress = progress
 
     def scan(self, puzzle, chunk) -> EngineOutcome:
+        started = time.monotonic()
         retries = 0
         thermal_elapsed = 0.0
         cooling = self._cooling_required
         while True:
             readiness_error = self._wait_until_ready(cooling=cooling)
             if readiness_error is not None:
-                return _error(readiness_error, elapsed=thermal_elapsed)
+                return _error(readiness_error, elapsed=max(thermal_elapsed, time.monotonic() - started))
             self._cooling_required = False
 
             self.abort_event.clear()
@@ -82,21 +85,29 @@ class ThermalGuardedEngine:
                 monitor.join(timeout=self.policy.poll_seconds + 6)
 
             if not trip_reason:
-                return outcome
+                return self._with_wall_time(outcome, started, thermal_elapsed)
 
             if outcome.status in {"complete", "found"}:
                 self._cooling_required = True
-                return outcome
+                return self._with_wall_time(outcome, started, thermal_elapsed)
 
             thermal_elapsed += outcome.elapsed_seconds
             retries += 1
+            if self.progress:
+                self.progress({"phase": "cooling", "thermal_retry": True})
             if retries > self.policy.max_retries:
                 return _error(
                     f"thermal guard stopped the GPU {retries} times; "
                     f"last reason: {trip_reason[-1]}",
-                    elapsed=thermal_elapsed,
+                    elapsed=max(thermal_elapsed, time.monotonic() - started),
                 )
             cooling = True
+
+    @staticmethod
+    def _with_wall_time(outcome, started, previous_elapsed):
+        elapsed = max(time.monotonic() - started, previous_elapsed + outcome.elapsed_seconds, 1e-9)
+        rate = outcome.checked / elapsed if outcome.status == "complete" else outcome.rate_keys_per_second
+        return replace(outcome, elapsed_seconds=elapsed, rate_keys_per_second=rate)
 
     def _wait_until_ready(self, *, cooling: bool) -> str | None:
         threshold = self.policy.resume_c if cooling else self.policy.maximum_c
@@ -111,6 +122,8 @@ class ThermalGuardedEngine:
                 return None
             cooling = True
             threshold = self.policy.resume_c
+            if self.progress:
+                self.progress({"phase": "cooling"})
             self.sleep(self.policy.poll_seconds)
 
     def _monitor(

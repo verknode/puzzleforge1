@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import re
+import os
+import math
+from collections import deque
 import subprocess
 import tempfile
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 from .crypto import p2pkh_address_from_private_key
 from .model import Puzzle
@@ -43,6 +46,8 @@ class EngineOutcome:
     found_key: int | None = None
     returncode: int | None = None
     message: str = ""
+    reported_rate_keys_per_second: float | None = None
+    first_rate_seconds: float | None = None
 
 
 _RATE_PATTERN = re.compile(
@@ -68,7 +73,8 @@ def parse_reported_rate(output: str) -> float | None:
         "g": 1e9,
         "t": 1e12,
     }[match.group("prefix").lower()]
-    return value * multiplier
+    rate = value * multiplier
+    return rate if math.isfinite(rate) and rate >= 0 else None
 
 
 def candidate_keys_from_output(output: str) -> tuple[int, ...]:
@@ -104,6 +110,7 @@ class BitCrackEngine:
         timeout_seconds: float | None = None,
         abort_event: threading.Event | None = None,
         poll_seconds: float = 0.25,
+        progress: Callable[[dict], None] | None = None,
     ) -> None:
         self.binary = binary.expanduser().resolve()
         self.tuning = tuning or EngineTuning()
@@ -114,6 +121,7 @@ class BitCrackEngine:
             raise ValueError("engine poll interval must be positive")
         self.abort_event = abort_event
         self.poll_seconds = poll_seconds
+        self.progress = progress
 
     def _assert_binary(self) -> None:
         if not self.binary.is_file():
@@ -183,62 +191,57 @@ class BitCrackEngine:
                 command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
             )
+            captured = _LiveOutput(puzzle, chunk, started)
+            readers = [threading.Thread(target=captured.read, args=(stream,), daemon=True)
+                       for stream in (process.stdout, process.stderr)]
+            for reader in readers:
+                reader.start()
             deadline = (
                 None
                 if self.timeout_seconds is None
                 else started + self.timeout_seconds
             )
+            stop_reason = None
             try:
+                if self.progress:
+                    self.progress({"phase": "initializing"})
                 while True:
                     now = time.monotonic()
                     wait_seconds = self.poll_seconds
                     if deadline is not None:
                         wait_seconds = min(wait_seconds, max(0.001, deadline - now))
                     try:
-                        stdout, stderr = process.communicate(timeout=wait_seconds)
+                        process.wait(timeout=wait_seconds)
                         break
                     except subprocess.TimeoutExpired:
+                        if self.progress:
+                            self.progress(captured.progress())
+                        if captured.found is not None:
+                            _stop_process(process)
+                            break
                         if self.abort_event is not None and self.abort_event.is_set():
-                            output = _terminate_process(process)
-                            elapsed = time.monotonic() - started
-                            return EngineOutcome(
-                                status="error",
-                                checked=0,
-                                elapsed_seconds=elapsed,
-                                rate_keys_per_second=0.0,
-                                returncode=process.returncode,
-                                message=(
-                                    "BitCrack stopped by the local safety guard; "
-                                    f"range was not credited. {_tail(output)}"
-                                ),
-                            )
+                            _stop_process(process)
+                            stop_reason = "BitCrack stopped by the local safety guard"
+                            break
                         if deadline is not None and time.monotonic() >= deadline:
-                            output = _terminate_process(process)
-                            elapsed = time.monotonic() - started
-                            return EngineOutcome(
-                                status="error",
-                                checked=0,
-                                elapsed_seconds=elapsed,
-                                rate_keys_per_second=0.0,
-                                returncode=process.returncode,
-                                message=(
-                                    "BitCrack timed out; range was not credited. "
-                                    f"{_tail(output)}"
-                                ),
-                            )
+                            _stop_process(process)
+                            stop_reason = "BitCrack timed out"
+                            break
             except BaseException:
-                _terminate_process(process)
+                _stop_process(process)
                 raise
+            finally:
+                for reader in readers:
+                    reader.join(timeout=5)
 
             elapsed = max(time.monotonic() - started, 1e-9)
-            output = (stdout or "") + (stderr or "")
+            output = captured.output()
             if output_file.exists():
                 output += "\n" + output_file.read_text(encoding="utf-8", errors="replace")
 
-            found = verified_candidate(puzzle, chunk, output)
-            reported_rate = parse_reported_rate(output)
+            found = captured.found or verified_candidate(puzzle, chunk, output)
+            reported_rate = captured.last_rate
             if found is not None:
                 return EngineOutcome(
                     status="found",
@@ -248,9 +251,11 @@ class BitCrackEngine:
                     found_key=found,
                     returncode=process.returncode,
                     message="Candidate independently verified by PuzzleForge.",
+                    reported_rate_keys_per_second=reported_rate,
+                    first_rate_seconds=captured.first_rate_seconds,
                 )
 
-            if process.returncode != 0:
+            if process.returncode != 0 or not captured.completed or stop_reason or captured.read_error:
                 return EngineOutcome(
                     status="error",
                     checked=0,
@@ -258,7 +263,8 @@ class BitCrackEngine:
                     rate_keys_per_second=reported_rate or 0.0,
                     returncode=process.returncode,
                     message=(
-                        f"BitCrack exited with code {process.returncode}; "
+                        (stop_reason or captured.read_error or f"BitCrack exited with code {process.returncode}") +
+                        f"{' without an end-of-keyspace confirmation' if not captured.completed else ''}; "
                         "range was not credited. "
                         f"{_tail(output)}"
                     ),
@@ -269,25 +275,81 @@ class BitCrackEngine:
                 status="complete",
                 checked=chunk.size,
                 elapsed_seconds=elapsed,
-                rate_keys_per_second=reported_rate or measured_rate,
+                rate_keys_per_second=measured_rate,
                 returncode=process.returncode,
                 message="Entire leased range completed without a match.",
+                reported_rate_keys_per_second=reported_rate,
+                first_rate_seconds=captured.first_rate_seconds,
             )
 
 
-def _terminate_process(process: subprocess.Popen[str]) -> str:
+def _stop_process(process: subprocess.Popen) -> None:
     if process.poll() is None:
         process.terminate()
         try:
-            stdout, stderr = process.communicate(timeout=5)
+            process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             process.kill()
-            stdout, stderr = process.communicate()
-    else:
-        stdout, stderr = process.communicate()
-    return (stdout or "") + (stderr or "")
+            process.wait(timeout=5)
+
+
+class _LiveOutput:
+    """Drain both pipes on Windows/POSIX, keeping bounded output and verified matches."""
+    def __init__(self, puzzle, chunk, started):
+        self.puzzle, self.chunk, self.started = puzzle, chunk, started
+        self.lines = deque(maxlen=32)
+        self.last_rate = self.rate_at = self.first_rate_seconds = self.found = None
+        self.completed = False
+        self.read_error = None
+        self.lock = threading.Lock()
+
+    def read(self, stream):
+        pending = b""
+        try:
+            while data := os.read(stream.fileno(), 4096):
+                pending += data
+                parts = re.split(rb"[\r\n]", pending)
+                pending = parts.pop()
+                for part in parts:
+                    self.accept(part)
+                if len(pending) > 16384:
+                    self.accept(pending[:-128])
+                    pending = pending[-128:]
+            if pending:
+                self.accept(pending)
+        except (OSError, ValueError):
+            self.read_error = "BitCrack output could not be fully read"
+        finally:
+            stream.close()
+
+    def accept(self, raw):
+        text = raw.decode("utf-8", errors="replace")
+        rate = parse_reported_rate(text)
+        found = verified_candidate(self.puzzle, self.chunk, text)
+        with self.lock:
+            self.lines.append(text[-2000:])
+            if "reached end of keyspace" in text.lower():
+                self.completed = True
+            if rate is not None:
+                self.last_rate, self.rate_at = rate, time.time()
+                if self.first_rate_seconds is None:
+                    self.first_rate_seconds = time.monotonic() - self.started
+            if found is not None:
+                self.found = found
+
+    def output(self):
+        with self.lock:
+            return "\n".join(self.lines)
+
+    def progress(self):
+        with self.lock:
+            return {"phase": "scanning" if self.last_rate is not None else "initializing",
+                    "reported_rate_keys_per_second": self.last_rate,
+                    "rate_at_epoch": self.rate_at, "first_rate_seconds": self.first_rate_seconds}
 
 
 def _tail(output: str, lines: int = 12, width: int = 2_000) -> str:
+    output = _LABELED_KEY_PATTERN.sub("Private key: [redacted]", output)
+    output = _FULL_KEY_PATTERN.sub("[redacted hex value]", output)
     compact = "\n".join(output.strip().splitlines()[-lines:])
     return compact[-width:]
