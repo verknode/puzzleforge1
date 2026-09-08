@@ -24,10 +24,10 @@ try {
         [IO.File]::WriteAllText((Join-Path $Fixture "src\puzzleforge\sample$i.py"), "sample $i")
     }
     [IO.File]::WriteAllText((Join-Path $Fixture 'scripts\puzzleforge-local.ps1'), 'param([switch]$Tune) Write-Host "Test launcher"')
-    $script:FixtureZip = Join-Path $TestRoot 'fixture.zip'
-    Compress-Archive -LiteralPath $Fixture -DestinationPath $script:FixtureZip
+    $FixtureZip = Join-Path $TestRoot 'fixture.zip'
+    Compress-Archive -LiteralPath $Fixture -DestinationPath $FixtureZip
     function Get-CimInstance { param($ClassName) return @() }
-    function Invoke-WebRequest { param([switch]$UseBasicParsing, $Uri, $OutFile) Copy-Item -LiteralPath $script:FixtureZip -Destination $OutFile }
+    function Invoke-WebRequest { param([switch]$UseBasicParsing, $Uri, $OutFile) Copy-Item -LiteralPath $FixtureZip -Destination $OutFile }
     & (Join-Path $RepoRoot 'scripts\Update-PuzzleForge.ps1') -Revision $Revision -RepoRoot $Target
     if ([IO.File]::ReadAllText((Join-Path $Target 'src\puzzleforge\cli.py')) -ne 'new code') { throw 'Code not updated' }
     if ([IO.File]::ReadAllText((Join-Path $Target '.puzzleforge\local\keep.txt')) -ne 'private state') { throw 'State changed' }
